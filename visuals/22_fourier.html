@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Knot</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #000; height: 100vh; overflow: hidden; font-family: 'Share Tech Mono', monospace; }
+  body::before {
+    content: ''; position: fixed; inset: 0;
+    background: radial-gradient(ellipse at center, #0a0f00 0%, #000 70%); z-index: 0;
+  }
+  #canvas { position: fixed; inset: 0; z-index: 1; display: block; }
+  .scanline {
+    position: fixed; inset: 0;
+    background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.08) 2px, rgba(0,0,0,0.08) 4px);
+    pointer-events: none; z-index: 2;
+  }
+  .vignette {
+    position: fixed; inset: 0;
+    background: radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.7) 100%);
+    pointer-events: none; z-index: 3;
+  }
+  #btn {
+    all: unset; position: fixed; top: 20px; left: 24px; z-index: 4;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px;
+    color: #39ff14; letter-spacing: 3px; cursor: pointer;
+  }
+  #tgkeys {
+    position: fixed; top: 54px; left: 24px; z-index: 4;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px;
+    letter-spacing: 3px; color: #39ff14;
+    display: flex; gap: 1ch;
+  }
+  #nkey { cursor: pointer; }
+  #grain-cv {
+    position: fixed; inset: 0; width: 100%; height: 100%;
+    pointer-events: none; z-index: 5;
+  }
+  #legend {
+    position: fixed; top: 20px; right: 24px; z-index: 4;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px;
+    display: grid; grid-template-columns: repeat(8, 1em);
+    gap: 4px 6px; line-height: 1.4; text-align: center;
+  }
+  #zko {
+    position: fixed; bottom: 20px; left: 24px; z-index: 4;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px;
+    letter-spacing: 3px; color: #39ff14; text-decoration: none; cursor: pointer;
+  }
+  #ops {
+    position: fixed; bottom: 20px; right: 24px; z-index: 4;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px;
+    letter-spacing: 3px; color: #39ff14;
+  }
+  #speed {
+    position: fixed; bottom: 40px; right: 24px; z-index: 4;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px;
+    letter-spacing: 3px; color: #39ff14; user-select: none;
+  }
+  #speed span { cursor: pointer; }
+  #ckey {
+    position: fixed; top: 68px; right: 24px; width: 1em; z-index: 4;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px;
+    line-height: 1.4; color: #39ff14; text-align: center; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div class="scanline"></div>
+<div class="vignette"></div>
+<button id="btn"></button>
+<div id="tgkeys"><div id="nkey">T</div></div>
+<div id="legend"></div>
+<div id="ops"></div>
+<div id="speed"><span id="slower">&lt;</span> <span id="faster">&gt;</span></div>
+<div id="ckey">C</div>
+<a id="zko" href="https://zko.io" target="_blank" rel="noopener"></a>
+<canvas id="grain-cv"></canvas>
+<canvas id="canvas"></canvas>
+<script>
+  const canvas = document.getElementById('canvas');
+  const ctx    = canvas.getContext('2d');
+
+  let W, H;
+  function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+  resize();
+  window.addEventListener('resize', resize);
+
+  // ── Character helpers ─────────────────────────────────────
+  const POOL = '.,:;+*#@0123456789';
+  const rc = () => POOL[Math.floor(Math.random() * POOL.length)];
+  const rb = () => String.fromCodePoint(0x2801 + Math.floor(Math.random() * 255));
+
+  // ── VGA 16-color palette ──────────────────────────────────
+  const VGA = [
+    '#000000','#0000AA','#00AA00','#00AAAA',
+    '#AA0000','#AA00AA','#AA5500','#AAAAAA',
+    '#555555','#5555FF','#55FF55','#55FFFF',
+    '#FF5555','#FF55FF','#FFFF55','#FFFFFF',
+  ];
+
+  // ── State ─────────────────────────────────────────────────
+  let lineColor = '#39ff14', colorIdx = 10, uiColorIdx = 10;
+  let cycleMs   = 280;
+  let ampLevel  = 0, ampWasHigh = false, crossBlink = 0;
+  const N_CROSS = 21;
+  const crossAngles       = new Float64Array(N_CROSS);
+  const crossTargetAngles = new Float64Array(N_CROSS);
+  let lastCrossRotTs = 0, lastCrossIndivTs = 0;
+  let lastTs    = null, parentAudio = null;
+
+  // ── Trail ─────────────────────────────────────────────────
+  const TRAIL_MAX      = 10;
+  const TRAIL_INTERVAL = 40; // ms between snapshots
+  const snapshots      = [];
+  let   lastSnapTs     = 0;
+
+
+  // ── Audio ─────────────────────────────────────────────────
+  let micActive = false, micStream = null, audioCtx = null, analyser = null, timeDomain = null;
+
+  // ── Torus knots ──────────────────────────────────────────
+  // (p, q) coprime — curve winds p times around torus axis, q around tube
+  const PRESETS = [
+    [2, 3],  // trefoil
+    [2, 5],  // cinquefoil
+    [2, 7],
+    [3, 4],
+    [3, 5],
+    [4, 5],
+    [3, 7],
+    [5, 6],
+  ];
+
+  const N_PTS = 1400;
+  let presetIdx = 0;
+  let rotY = 0;
+  let rotX = 0.45;
+
+  function triggerKnot() {
+    presetIdx = (presetIdx + 1) % PRESETS.length;
+  }
+
+  // ── Render ────────────────────────────────────────────────
+  function frame(ts) {
+    if (!lastTs) lastTs = ts;
+    const dt = Math.min((ts - lastTs) / 1000, 0.05);
+    lastTs = ts;
+
+    // Audio
+    if (micActive || parentAudio) {
+      let rms;
+      if (micActive) {
+        analyser.getByteTimeDomainData(timeDomain);
+        let sq = 0;
+        for (let k = 0; k < timeDomain.length; k++) { const d = timeDomain[k] / 255 - 0.5; sq += d * d; }
+        rms = Math.sqrt(sq / timeDomain.length);
+      } else { rms = parentAudio.rms; }
+      ampLevel += (rms * 5 - ampLevel) * 0.12;
+      if (rms > 0.05 && !ampWasHigh) { triggerKnot(); crossBlink = 1.0; ampWasHigh = true; }
+      else if (rms < 0.03) ampWasHigh = false;
+    } else {
+      ampLevel *= 0.92;
+    }
+
+    rotY += dt * 0.20 * (140 / cycleMs) * (1 + ampLevel * 0.6);
+    rotX += dt * 0.07 * (140 / cycleMs);
+
+    const [p, q] = PRESETS[presetIdx];
+    const cosY = Math.cos(rotY), sinY = Math.sin(rotY);
+    const cosX = Math.cos(rotX), sinX = Math.sin(rotX);
+
+    const scale = Math.min(W, H) * 0.30;
+    const cx = W / 2, cy = H / 2;
+    const R = 2, r = 1, norm = R + r;
+    const zStretch = 1 + ampLevel * 0.6;
+
+    const pts2d = [];
+    for (let i = 0; i <= N_PTS; i++) {
+      const t  = (i / N_PTS) * Math.PI * 2;
+      const x3 = (R + r * Math.cos(q * t)) * Math.cos(p * t) / norm;
+      const y3 = (R + r * Math.cos(q * t)) * Math.sin(p * t) / norm;
+      const z3 = r * Math.sin(q * t) / norm * zStretch;
+      // Rotate Y then X
+      const rx = x3 * cosY - z3 * sinY;
+      const rz = x3 * sinY + z3 * cosY;
+      const ry = y3 * cosX - rz * sinX;
+      pts2d.push([cx + rx * scale, cy - ry * scale]);
+    }
+
+    // Snapshot for trail
+    if (ts - lastSnapTs > TRAIL_INTERVAL) {
+      snapshots.push(pts2d.slice());
+      while (snapshots.length > TRAIL_MAX) snapshots.shift();
+      lastSnapTs = ts;
+    }
+
+    ctx.clearRect(0, 0, W, H);
+
+    // Trail — fading ghost copies
+    ctx.strokeStyle = lineColor;
+    ctx.shadowColor = lineColor;
+    ctx.shadowBlur  = 3;
+    ctx.lineWidth   = 0.6;
+    for (let si = 0; si < snapshots.length; si++) {
+      const frac = (si + 1) / snapshots.length; // 0=oldest → 1=newest
+      ctx.globalAlpha = frac * frac * 0.35;
+      ctx.beginPath();
+      const snap = snapshots[si];
+      ctx.moveTo(snap[0][0], snap[0][1]);
+      for (let i = 1; i < snap.length; i++) ctx.lineTo(snap[i][0], snap[i][1]);
+      ctx.closePath();
+      ctx.stroke();
+    }
+
+    // 3-pass glow
+    const passes = [
+      { blur: 14, alpha: 0.18, lw: 3.0 },
+      { blur: 4,  alpha: 0.50, lw: 1.4 },
+      { blur: 0,  alpha: 0.90, lw: 0.7 },
+    ];
+    for (const { blur, alpha, lw } of passes) {
+      ctx.strokeStyle = lineColor;
+      ctx.shadowColor = lineColor;
+      ctx.shadowBlur  = blur;
+      ctx.lineWidth   = lw;
+      ctx.globalAlpha = alpha;
+      ctx.beginPath();
+      ctx.moveTo(pts2d[0][0], pts2d[0][1]);
+      for (let i = 1; i < pts2d.length; i++) ctx.lineTo(pts2d[i][0], pts2d[i][1]);
+      ctx.closePath();
+      ctx.stroke();
+    }
+
+
+    // Crosses at midpoints of the (removed) rotated square
+    const sq = scale * 0.90;
+    const m  = sq / Math.SQRT2;
+    const cs = 7;
+    ctx.lineWidth  = 0.8;
+    ctx.shadowBlur = 3;
+
+    // Midpoint crosses — blink on sound threshold, rotate 90° CCW every 4s (all), random CW every 12s
+    crossBlink *= 0.88;
+    if (ts - lastCrossRotTs > 4000) {
+      for (let i = 0; i < N_CROSS; i++) crossTargetAngles[i] -= Math.PI / 2;
+      lastCrossRotTs = ts;
+    }
+    if (ts - lastCrossIndivTs > 12000) {
+      const pick = Math.floor(Math.random() * N_CROSS);
+      crossTargetAngles[pick] += Math.PI / 2;
+      lastCrossIndivTs = ts;
+    }
+    for (let i = 0; i < N_CROSS; i++) crossAngles[i] += (crossTargetAngles[i] - crossAngles[i]) * 0.08;
+    const gap = m * 2;
+    ctx.globalAlpha = 0.28 + crossBlink * 0.65;
+    const crossPos = [
+      [cx+m, cy-m], [cx+m, cy+m], [cx-m, cy+m], [cx-m, cy-m],
+      [cx+m+gap, cy-m], [cx+m+gap, cy+m],
+      [cx-m-gap, cy-m], [cx-m-gap, cy+m],
+      [cx+m+gap/2, cy-m], [cx+m+gap/2, cy+m],
+      [cx-m-gap/2, cy-m], [cx-m-gap/2, cy+m],
+      [cx+m, cy], [cx, cy+m], [cx-m, cy], [cx, cy-m],
+      [cx, cy],
+      [cx+m+gap/2, cy], [cx-m-gap/2, cy],
+      [cx+m+gap, cy], [cx-m-gap, cy],
+    ];
+    for (let i = 0; i < N_CROSS; i++) {
+      const [mx, my] = crossPos[i];
+      ctx.save();
+      ctx.translate(mx, my);
+      ctx.rotate(crossAngles[i]);
+      ctx.beginPath();
+      ctx.moveTo(-cs, 0); ctx.lineTo(cs, 0);
+      ctx.moveTo(0, -cs); ctx.lineTo(0, cs);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+
+    ctx.globalAlpha = 1;
+    ctx.shadowBlur  = 0;
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+
+  // ── Grain ─────────────────────────────────────────────────
+  let grainOn = true;
+  const grainEl = document.getElementById('grain-cv');
+  const grainCx = grainEl.getContext('2d');
+  let grainImg = null;
+  function drawGrainFrame() {
+    if (!grainOn) return;
+    const gW = Math.ceil(window.innerWidth  / 2);
+    const gH = Math.ceil(window.innerHeight / 2);
+    if (grainEl.width !== gW || grainEl.height !== gH) {
+      grainEl.width = gW; grainEl.height = gH;
+      grainImg = grainCx.createImageData(gW, gH);
+    }
+    const data = grainImg.data;
+    for (let i = 0; i < data.length; i += 4) {
+      const v = Math.random() * 255 | 0;
+      data[i] = data[i+1] = data[i+2] = v;
+      data[i+3] = Math.random() * 30 | 0;
+    }
+    grainCx.putImageData(grainImg, 0, 0);
+    requestAnimationFrame(drawGrainFrame);
+  }
+  function toggleGrain() {
+    grainOn = !grainOn;
+    document.getElementById('gkey').style.opacity = grainOn ? '0.4' : '';
+    if (grainOn) drawGrainFrame();
+  }
+  window.addEventListener('keydown', e => { if (e.key === 'g' || e.key === 'G') toggleGrain(); });
+  drawGrainFrame();
+
+  // ── Canvas / trigger key click ────────────────────────────
+  canvas.addEventListener('click', triggerKnot);
+  document.getElementById('nkey').addEventListener('click', triggerKnot);
+
+  // ── Mic toggle ────────────────────────────────────────────
+  const btn = document.getElementById('btn');
+  btn.addEventListener('click', async () => {
+    if (micActive) {
+      micActive = false; btn.style.opacity = '0.4';
+      micStream?.getTracks().forEach(t => t.stop()); audioCtx?.close();
+      micStream = audioCtx = analyser = timeDomain = null; ampLevel = 0; return;
+    }
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      audioCtx  = new (window.AudioContext || window.webkitAudioContext)();
+      const src = audioCtx.createMediaStreamSource(micStream);
+      analyser  = audioCtx.createAnalyser();
+      analyser.fftSize = 2048; analyser.smoothingTimeConstant = 0.5;
+      src.connect(analyser);
+      timeDomain = new Uint8Array(analyser.fftSize);
+      micActive  = true; btn.style.opacity = '';
+    } catch { /* permission denied */ }
+  });
+
+  // ── C-key modifier ────────────────────────────────────────
+  let cHeld = false;
+
+  // ── VGA legend ────────────────────────────────────────────
+  const legendEl = document.getElementById('legend');
+  const opsEl    = document.getElementById('ops');
+  const zkoEl    = document.getElementById('zko');
+
+  const legendSpans = VGA.map(col => {
+    const s = document.createElement('span');
+    s.style.color = col; s.style.cursor = 'pointer'; s.textContent = rc();
+    s.addEventListener('click', () => {
+      if (cHeld) {
+        btn.style.color  = col; opsEl.style.color = col; zkoEl.style.color = col;
+        document.getElementById('ckey').style.color   = col;
+        document.getElementById('speed').style.color  = col;
+        document.getElementById('tgkeys').style.color = col;
+      } else { lineColor = col; colorIdx = VGA.indexOf(col); }
+    });
+    legendEl.appendChild(s); return s;
+  });
+
+  zkoEl.textContent = rc()+rc()+rc()+rc();
+  btn.textContent   = rb();
+  opsEl.textContent = rc()+rc()+rc()+rc();
+
+  setInterval(() => { btn.textContent = rb(); }, 140);
+  setInterval(() => {
+    opsEl.textContent = rc()+rc()+rc()+rc();
+    zkoEl.textContent = rc()+rc()+rc()+rc();
+    legendSpans.forEach(s => s.textContent = rc());
+  }, 200);
+
+  // ── Speed UI ─────────────────────────────────────────────
+  function updateSpeedUI() {
+    const sl = document.getElementById('slower'), fa = document.getElementById('faster');
+    sl.style.opacity = cycleMs >= 560 ? '0.4' : '1'; sl.style.pointerEvents = cycleMs >= 560 ? 'none' : '';
+    fa.style.opacity = cycleMs <= 140 ? '0.4' : '1'; fa.style.pointerEvents = cycleMs <= 140 ? 'none' : '';
+  }
+  updateSpeedUI();
+  document.getElementById('slower').addEventListener('click', () => { cycleMs = Math.min(560, cycleMs + 140); updateSpeedUI(); });
+  document.getElementById('faster').addEventListener('click', () => { cycleMs = Math.max(140, cycleMs - 140); updateSpeedUI(); });
+
+  // ── Keyboard ─────────────────────────────────────────────
+  window.addEventListener('keydown', e => {
+    if (e.isTrusted) window.parent?.postMessage({ type: 'childKey', key: e.key, shiftKey: !!e.shiftKey }, '*');
+    if      (e.key === 't' || e.key === 'T')           triggerKnot();
+    else if (e.key === 'ArrowLeft'  && !cHeld)    { cycleMs = Math.min(560, cycleMs + 140); updateSpeedUI(); }
+    else if (e.key === 'ArrowRight' && !cHeld)    { cycleMs = Math.max(140, cycleMs - 140); updateSpeedUI(); }
+    else if (!cHeld && e.key === 'ArrowUp')      { colorIdx = (colorIdx - 1 + VGA.length) % VGA.length; lineColor = VGA[colorIdx]; }
+    else if (!cHeld && e.key === 'ArrowDown')     { colorIdx = (colorIdx + 1) % VGA.length; lineColor = VGA[colorIdx]; }
+    else if (cHeld && e.key === 'ArrowUp') {
+      uiColorIdx = (uiColorIdx - 1 + VGA.length) % VGA.length;
+      btn.style.color  = VGA[uiColorIdx]; opsEl.style.color = VGA[uiColorIdx]; zkoEl.style.color = VGA[uiColorIdx];
+      document.getElementById('ckey').style.color   = VGA[uiColorIdx];
+      document.getElementById('speed').style.color  = VGA[uiColorIdx];
+      document.getElementById('tgkeys').style.color = VGA[uiColorIdx];
+    } else if (cHeld && e.key === 'ArrowDown') {
+      uiColorIdx = (uiColorIdx + 1) % VGA.length;
+      btn.style.color  = VGA[uiColorIdx]; opsEl.style.color = VGA[uiColorIdx]; zkoEl.style.color = VGA[uiColorIdx];
+      document.getElementById('ckey').style.color   = VGA[uiColorIdx];
+      document.getElementById('speed').style.color  = VGA[uiColorIdx];
+      document.getElementById('tgkeys').style.color = VGA[uiColorIdx];
+    }
+    else if (e.key === 'c' || e.key === 'C')           cHeld = true;
+  });
+
+  window.addEventListener('keyup', e => {
+    if (e.isTrusted) window.parent?.postMessage({ type: 'childKeyup', key: e.key }, '*');
+    if (e.key === 'c' || e.key === 'C') cHeld = false;
+  });
+
+  // ── postMessage bridge ────────────────────────────────────
+  window.addEventListener('message', e => {
+    if (e.data?.type === 'key') {
+      if (e.data.cHeld !== undefined) cHeld = !!e.data.cHeld;
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: e.data.key, shiftKey: !!e.data.shiftKey, bubbles: true }));
+    }
+    else if (e.data?.type === 'keyup')
+      window.dispatchEvent(new KeyboardEvent('keyup', { key: e.data.key, bubbles: true }));
+    else if (e.data?.type === 'audioData')
+      parentAudio = e.data;
+  });
+
+  // Randomize colors on load
+  (function() {
+    const GOOD = [6,11,13,14,15];
+    colorIdx  = GOOD[Math.floor(Math.random() * GOOD.length)];
+    lineColor = VGA[colorIdx];
+    const _uiPool = GOOD.filter(i => i !== colorIdx);
+    uiColorIdx = _uiPool[Math.floor(Math.random() * _uiPool.length)];
+    const _uc = VGA[uiColorIdx];
+    if (btn)   btn.style.color   = _uc;
+    if (opsEl) opsEl.style.color = _uc;
+    if (zkoEl) zkoEl.style.color = _uc;
+    const _ck = document.getElementById('ckey');
+    const _tk = document.getElementById('tgkeys');
+    const _sp = document.getElementById('speed');
+    if (_ck) _ck.style.color = _uc;
+    if (_tk) _tk.style.color = _uc;
+    if (_sp) _sp.style.color = _uc;
+  })();
+</script>
+</body>
+</html>

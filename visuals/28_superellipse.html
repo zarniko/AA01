@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Superellipse</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #000;
+    height: 100vh;
+    overflow: hidden;
+    font-family: 'Share Tech Mono', monospace;
+  }
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: radial-gradient(ellipse at center, #0a0f00 0%, #000 70%);
+    z-index: 0;
+  }
+  #canvas {
+    position: fixed;
+    inset: 0;
+    z-index: 1;
+    display: block;
+  }
+  .scanline {
+    position: fixed;
+    inset: 0;
+    background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.08) 2px, rgba(0,0,0,0.08) 4px);
+    pointer-events: none;
+    z-index: 2;
+  }
+  .vignette {
+    position: fixed;
+    inset: 0;
+    background: radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.7) 100%);
+    pointer-events: none;
+    z-index: 3;
+  }
+  #btn {
+    all: unset;
+    position: fixed;
+    top: 20px;
+    left: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    color: #39ff14;
+    letter-spacing: 3px;
+    cursor: pointer;
+  }
+  #legend {
+    position: fixed;
+    top: 20px;
+    right: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    display: grid;
+    grid-template-columns: repeat(8, 1em);
+    gap: 4px 6px;
+    line-height: 1.4;
+    text-align: center;
+  }
+  #zko {
+    position: fixed;
+    bottom: 20px;
+    left: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    letter-spacing: 3px;
+    color: #39ff14;
+    text-decoration: none;
+    cursor: pointer;
+  }
+  #ops {
+    position: fixed;
+    bottom: 20px;
+    right: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    letter-spacing: 3px;
+    color: #39ff14;
+  }
+  #speed {
+    position: fixed;
+    bottom: 40px;
+    right: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    letter-spacing: 3px;
+    color: #39ff14;
+    user-select: none;
+  }
+  #speed span { cursor: pointer; }
+  #tgkeys {
+    position: fixed;
+    top: 54px;
+    left: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    letter-spacing: 3px;
+    color: #39ff14;
+    display: flex;
+    gap: 1ch;
+  }
+  #tkey { cursor: pointer; }
+  #grain-cv {
+    position: fixed; inset: 0; width: 100%; height: 100%;
+    pointer-events: none; z-index: 5;
+  }
+  #mlabel {
+    position: fixed;
+    left: calc(50% + 38vmin);
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    letter-spacing: 3px;
+    color: #39ff14;
+    pointer-events: none;
+  }
+  #ckey {
+    position: fixed;
+    top: 68px;
+    right: 24px;
+    width: 1em;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    line-height: 1.4;
+    color: #39ff14;
+    text-align: center;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div class="scanline"></div>
+<div class="vignette"></div>
+<button id="btn"></button>
+<div id="tgkeys"><div id="tkey">T</div></div>
+<div id="legend"></div>
+<div id="ops"></div>
+<div id="speed"><span id="slower">&lt;</span> <span id="faster">&gt;</span></div>
+<div id="mlabel"></div>
+<div id="ckey">C</div>
+<a id="zko" href="https://zko.io" target="_blank" rel="noopener"></a>
+<canvas id="grain-cv"></canvas>
+<canvas id="canvas"></canvas>
+<script>
+  const canvas = document.getElementById('canvas');
+  const ctx    = canvas.getContext('2d');
+
+  let W, H;
+  function resize() {
+    W = canvas.width  = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  // ── Character pools ───────────────────────────────────────
+  const POOL = '.,:;+*#@0123456789';
+  const rc = () => POOL[Math.floor(Math.random() * POOL.length)];
+  const rb = () => String.fromCodePoint(0x2801 + Math.floor(Math.random() * 255));
+  const PRIMES = ['2','3','5','7','11','13','17','19','/'];
+  const rp = () => PRIMES[Math.floor(Math.random() * PRIMES.length)];
+
+  // ── VGA 16-color palette ──────────────────────────────────
+  const VGA = [
+    '#000000','#0000AA','#00AA00','#00AAAA',
+    '#AA0000','#AA00AA','#AA5500','#AAAAAA',
+    '#555555','#5555FF','#55FF55','#55FFFF',
+    '#FF5555','#FF55FF','#FFFF55','#FFFFFF',
+  ];
+
+  // ── Gielis superformula ─────────────────────────────────────
+  // r(θ) = [ |cos(mθ/4)|^n + |sin(mθ/4)|^n ]^(-1/n)
+  // Family: sweep n from ~0.1 (deeply cusped) to 2 (perfect circle)
+  // m = rotational symmetry (1=teardrop, 2=lens, 3=triangle, 4=cross, ...)
+  const M_PRESETS = [1, 2, 3, 4, 5, 6, 7, 8];
+  const N_CURVES  = 12;
+  const N_MIN     = 0.08;
+  const N_MAX     = 2.0;  // n=2 is the bounding circle
+
+  // ── State ─────────────────────────────────────────────────
+  let mIdx         = 2;        // start at m=3
+  let currentM     = M_PRESETS[mIdx];
+  let angle        = 0;
+  let ampLevel     = 0;
+  let triggerFlash = 0;
+  let lineColor    = '#39ff14';
+  let colorIdx     = 10;
+  let uiColorIdx   = 10;
+  let cycleMs      = 140;
+  let lastTs       = null;
+  let parentAudio  = null;
+
+  // ── Audio ─────────────────────────────────────────────────
+  let micActive = false, micStream = null, audioCtx = null, analyser = null, timeDomain = null;
+  let ampWasHigh = false;
+
+  // ── Superformula polar radius ─────────────────────────────
+  function superRadius(theta, m, n) {
+    const t1 = Math.abs(Math.cos(m * theta / 4));
+    const t2 = Math.abs(Math.sin(m * theta / 4));
+    const sum = Math.pow(t1, n) + Math.pow(t2, n);
+    if (sum < 1e-12) return 1e6;
+    return Math.pow(sum, -1 / n);
+  }
+
+  // ── Trigger ───────────────────────────────────────────────
+  let triggerCount = 0;
+  function triggerSuperellipse() {
+    triggerCount++;
+    if (triggerCount % 4 === 0) {
+      mIdx = Math.floor(Math.random() * M_PRESETS.length);
+    } else {
+      mIdx = (mIdx + 1) % M_PRESETS.length;
+    }
+    currentM = M_PRESETS[mIdx];
+    triggerFlash = 1.0;
+    updateOpsLabel();
+  }
+
+  const mlabelEl = document.getElementById('mlabel');
+  function updateOpsLabel() {
+    mlabelEl.textContent = 'm=' + M_PRESETS[mIdx];
+  }
+
+  // ── Render ────────────────────────────────────────────────
+  const N_PTS = 800;
+
+  function frame(ts) {
+    if (!lastTs) lastTs = ts;
+    const dt = Math.min((ts - lastTs) / 1000, 0.05);
+    lastTs = ts;
+
+    // Audio processing
+    if (micActive || parentAudio) {
+      let rms;
+      if (micActive) {
+        analyser.getByteTimeDomainData(timeDomain);
+        let sq = 0;
+        for (let k = 0; k < timeDomain.length; k++) {
+          const d = timeDomain[k] / 255 - 0.5; sq += d * d;
+        }
+        rms = Math.sqrt(sq / timeDomain.length);
+      } else { rms = parentAudio.rms; }
+      ampLevel += (rms * 6 - ampLevel) * 0.15;
+      if (rms > 0.05 && !ampWasHigh) { triggerSuperellipse(); ampWasHigh = true; }
+      else if (rms < 0.03) { ampWasHigh = false; }
+    } else {
+      ampLevel *= 0.92;
+    }
+
+    // Advance phase
+    const phaseSpeed = 0.0008 * (140 / cycleMs) * (1 + ampLevel * 3);
+    angle += phaseSpeed;
+
+    // Decay trigger flash
+    triggerFlash *= 0.90;
+
+    const cx = W / 2, cy = H / 2;
+    const baseScale = Math.min(W, H) * 0.36;
+
+    ctx.clearRect(0, 0, W, H);
+
+    // 3-pass glow render
+    const flashBoost = triggerFlash * 0.25;
+    const passes = [
+      { blur: 14, alpha: 0.22 + flashBoost, lw: 2.5 },
+      { blur: 4,  alpha: 0.50 + flashBoost, lw: 1.2 },
+      { blur: 0,  alpha: 0.90 + flashBoost, lw: 0.6 },
+    ];
+
+    const m = currentM;
+
+    for (const { blur, alpha, lw } of passes) {
+      ctx.strokeStyle = lineColor;
+      ctx.shadowColor = lineColor;
+      ctx.shadowBlur  = blur;
+      ctx.lineWidth   = lw;
+
+      // Draw family of curves: each curve's n breathes with a phase offset,
+      // creating a ripple that flows through the family
+      for (let c = 0; c < N_CURVES; c++) {
+        const frac   = c / (N_CURVES - 1);
+        const baseN  = N_MIN + frac * (N_MAX - N_MIN);
+        // Each curve oscillates its n with a phase offset — inner curves lead
+        const wave   = Math.sin(angle * 4 - c * 0.45) * 0.12 * (1 - frac);
+        const n      = Math.max(0.04, baseN + wave * baseN);
+
+        ctx.globalAlpha = Math.min(1, alpha * (0.4 + frac * 0.6));
+
+        ctx.beginPath();
+        for (let i = 0; i <= N_PTS; i++) {
+          const theta = (i / N_PTS) * Math.PI * 2;
+          const r = superRadius(theta, m, n) * baseScale;
+          const px = r * Math.cos(theta);
+          const py = r * Math.sin(theta);
+          if (i === 0) ctx.moveTo(cx + px, cy + py);
+          else         ctx.lineTo(cx + px, cy + py);
+        }
+        ctx.closePath();
+        ctx.stroke();
+      }
+    }
+
+    // Dashed axes (static, no rotation)
+    ctx.globalAlpha = Math.min(1, 0.15 + triggerFlash * 0.3);
+    ctx.strokeStyle = lineColor;
+    ctx.shadowColor = lineColor;
+    ctx.shadowBlur  = 4;
+    ctx.lineWidth   = 0.5;
+    ctx.setLineDash([6, 8]);
+    ctx.lineDashOffset = -ts * 0.012;
+    const axLen = baseScale * 1.12;
+    ctx.beginPath();
+    ctx.moveTo(cx - axLen, cy);
+    ctx.lineTo(cx + axLen, cy);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - axLen);
+    ctx.lineTo(cx, cy + axLen);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.globalAlpha = 1;
+    ctx.shadowBlur  = 0;
+
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+
+  // ── Grain ─────────────────────────────────────────────────
+  const grainEl = document.getElementById('grain-cv');
+  const grainCx = grainEl.getContext('2d');
+  let grainImg  = null;
+  function drawGrainFrame() {
+    const gW = Math.ceil(window.innerWidth  / 2);
+    const gH = Math.ceil(window.innerHeight / 2);
+    if (grainEl.width !== gW || grainEl.height !== gH) {
+      grainEl.width = gW; grainEl.height = gH;
+      grainImg = grainCx.createImageData(gW, gH);
+    }
+    const data = grainImg.data;
+    for (let i = 0; i < data.length; i += 4) {
+      const v = Math.random() * 255 | 0;
+      data[i] = data[i+1] = data[i+2] = v;
+      data[i+3] = Math.random() * 30 | 0;
+    }
+    grainCx.putImageData(grainImg, 0, 0);
+    requestAnimationFrame(drawGrainFrame);
+  }
+  drawGrainFrame();
+
+  // ── Canvas click ──────────────────────────────────────────
+  canvas.addEventListener('click', triggerSuperellipse);
+  document.getElementById('tkey').addEventListener('click', triggerSuperellipse);
+
+  // ── Mic toggle ────────────────────────────────────────────
+  const btn = document.getElementById('btn');
+  btn.addEventListener('click', async () => {
+    if (micActive) {
+      micActive = false;
+      btn.style.opacity = '0.4';
+      micStream?.getTracks().forEach(t => t.stop());
+      audioCtx?.close();
+      micStream = audioCtx = analyser = timeDomain = null;
+      ampLevel = 0;
+      return;
+    }
+    try {
+      micStream  = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      audioCtx   = new (window.AudioContext || window.webkitAudioContext)();
+      const src  = audioCtx.createMediaStreamSource(micStream);
+      analyser   = audioCtx.createAnalyser();
+      analyser.fftSize               = 2048;
+      analyser.smoothingTimeConstant = 0.5;
+      src.connect(analyser);
+      timeDomain = new Uint8Array(analyser.fftSize);
+      micActive  = true;
+      btn.style.opacity = '';
+    } catch { /* permission denied */ }
+  });
+
+  // ── C-key modifier ────────────────────────────────────────
+  let cHeld = false;
+
+  // ── VGA legend ────────────────────────────────────────────
+  const legendEl    = document.getElementById('legend');
+  const legendSpans = VGA.map(col => {
+    const s = document.createElement('span');
+    s.style.color  = col;
+    s.style.cursor = 'pointer';
+    s.textContent  = rc();
+    s.addEventListener('click', () => {
+      if (cHeld) {
+        btn.style.color                               = col;
+        opsEl.style.color                             = col;
+        zkoEl.style.color                             = col;
+        document.getElementById('ckey').style.color    = col;
+        document.getElementById('speed').style.color   = col;
+        document.getElementById('tgkeys').style.color  = col;
+        document.getElementById('mlabel').style.color  = col;
+      } else {
+        lineColor = col;
+        colorIdx  = VGA.indexOf(col);
+      }
+    });
+    legendEl.appendChild(s);
+    return s;
+  });
+
+  const zkoEl = document.getElementById('zko');
+  const opsEl = document.getElementById('ops');
+
+  zkoEl.textContent = rc()+rc()+rc()+rc();
+  btn.textContent   = rb();
+  opsEl.textContent = rp()+rp();
+  updateOpsLabel();
+
+  // ── Braille btn cycling ───────────────────────────────────
+  setInterval(() => { btn.textContent = rb(); }, 140);
+
+  // ── UI label flickering ───────────────────────────────────
+  setInterval(() => {
+    opsEl.textContent = rp()+rp();
+    zkoEl.textContent = rc()+rc()+rc()+rc();
+    legendSpans.forEach(s => s.textContent = rc());
+    updateOpsLabel();
+  }, 200);
+
+  // ── Speed UI ──────────────────────────────────────────────
+  function updateSpeedUI() {
+    const sl = document.getElementById('slower');
+    const fa = document.getElementById('faster');
+    sl.style.opacity       = cycleMs >= 560 ? '0.4' : '1';
+    sl.style.pointerEvents = cycleMs >= 560 ? 'none' : '';
+    fa.style.opacity       = cycleMs <= 140 ? '0.4' : '1';
+    fa.style.pointerEvents = cycleMs <= 140 ? 'none' : '';
+  }
+  updateSpeedUI();
+
+  document.getElementById('slower').addEventListener('click', () => {
+    cycleMs = Math.min(560, cycleMs + 140);
+    updateSpeedUI();
+  });
+  document.getElementById('faster').addEventListener('click', () => {
+    cycleMs = Math.max(140, cycleMs - 140);
+    updateSpeedUI();
+  });
+
+  // ── Keyboard ──────────────────────────────────────────────
+  window.addEventListener('keydown', e => {
+    if (e.isTrusted) window.parent?.postMessage({ type: 'childKey', key: e.key, shiftKey: !!e.shiftKey }, '*');
+    if (e.key === 'c' || e.key === 'C') { cHeld = true; return; }
+    if (e.key === 't' || e.key === 'T') {
+      triggerSuperellipse();
+    } else if (e.key === 'ArrowLeft' && !cHeld) {
+      cycleMs = Math.min(560, cycleMs + 140);
+      updateSpeedUI();
+    } else if (e.key === 'ArrowRight' && !cHeld) {
+      cycleMs = Math.max(140, cycleMs - 140);
+      updateSpeedUI();
+    } else if (!cHeld && e.key === 'ArrowUp') {
+      colorIdx  = (colorIdx - 1 + VGA.length) % VGA.length;
+      lineColor = VGA[colorIdx];
+    } else if (!cHeld && e.key === 'ArrowDown') {
+      colorIdx  = (colorIdx + 1) % VGA.length;
+      lineColor = VGA[colorIdx];
+    } else if (cHeld && e.key === 'ArrowUp') {
+      uiColorIdx = (uiColorIdx - 1 + VGA.length) % VGA.length;
+      btn.style.color                               = VGA[uiColorIdx];
+      opsEl.style.color                             = VGA[uiColorIdx];
+      zkoEl.style.color                             = VGA[uiColorIdx];
+      document.getElementById('ckey').style.color    = VGA[uiColorIdx];
+      document.getElementById('speed').style.color   = VGA[uiColorIdx];
+      document.getElementById('tgkeys').style.color  = VGA[uiColorIdx];
+      document.getElementById('mlabel').style.color  = VGA[uiColorIdx];
+    } else if (cHeld && e.key === 'ArrowDown') {
+      uiColorIdx = (uiColorIdx + 1) % VGA.length;
+      btn.style.color                               = VGA[uiColorIdx];
+      opsEl.style.color                             = VGA[uiColorIdx];
+      zkoEl.style.color                             = VGA[uiColorIdx];
+      document.getElementById('ckey').style.color    = VGA[uiColorIdx];
+      document.getElementById('speed').style.color   = VGA[uiColorIdx];
+      document.getElementById('tgkeys').style.color  = VGA[uiColorIdx];
+      document.getElementById('mlabel').style.color  = VGA[uiColorIdx];
+    }
+  });
+
+  window.addEventListener('keyup', e => {
+    if (e.isTrusted) window.parent?.postMessage({ type: 'childKeyup', key: e.key }, '*');
+    if (e.key === 'c' || e.key === 'C') cHeld = false;
+  });
+
+  // ── postMessage bridge ────────────────────────────────────
+  window.addEventListener('message', e => {
+    if (e.data?.type === 'key') {
+      if (e.data.cHeld !== undefined) cHeld = !!e.data.cHeld;
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: e.data.key, shiftKey: !!e.data.shiftKey, bubbles: true }));
+    }
+    else if (e.data?.type === 'keyup')
+      window.dispatchEvent(new KeyboardEvent('keyup', { key: e.data.key, bubbles: true }));
+    else if (e.data?.type === 'audioData')
+      parentAudio = e.data;
+  });
+
+  // Randomize colors on load
+  (function() {
+    const GOOD = [6,11,13,14,15];
+    colorIdx  = GOOD[Math.floor(Math.random() * GOOD.length)];
+    lineColor = VGA[colorIdx];
+    const _uiPool = GOOD.filter(i => i !== colorIdx);
+    uiColorIdx = _uiPool[Math.floor(Math.random() * _uiPool.length)];
+    const _uc = VGA[uiColorIdx];
+    if (btn)   btn.style.color   = _uc;
+    if (opsEl) opsEl.style.color = _uc;
+    if (zkoEl) zkoEl.style.color = _uc;
+    const _ck = document.getElementById('ckey');
+    const _tk = document.getElementById('tgkeys');
+    const _sp = document.getElementById('speed');
+    if (_ck) _ck.style.color = _uc;
+    if (_tk) _tk.style.color = _uc;
+    if (_sp) _sp.style.color = _uc;
+    const _ml = document.getElementById('mlabel');
+    if (_ml) _ml.style.color = _uc;
+  })();
+</script>
+</body>
+</html>

@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Lissajous</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #000;
+    height: 100vh;
+    overflow: hidden;
+    font-family: 'Share Tech Mono', monospace;
+  }
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: radial-gradient(ellipse at center, #0a0f00 0%, #000 70%);
+    z-index: 0;
+  }
+  #canvas {
+    position: fixed;
+    inset: 0;
+    z-index: 1;
+    display: block;
+  }
+  .scanline {
+    position: fixed;
+    inset: 0;
+    background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.08) 2px, rgba(0,0,0,0.08) 4px);
+    pointer-events: none;
+    z-index: 2;
+  }
+  .vignette {
+    position: fixed;
+    inset: 0;
+    background: radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.7) 100%);
+    pointer-events: none;
+    z-index: 3;
+  }
+  #btn {
+    all: unset;
+    position: fixed;
+    top: 20px;
+    left: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    color: #39ff14;
+    letter-spacing: 3px;
+    cursor: pointer;
+  }
+  #legend {
+    position: fixed;
+    top: 20px;
+    right: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    display: grid;
+    grid-template-columns: repeat(8, 1em);
+    gap: 4px 6px;
+    line-height: 1.4;
+    text-align: center;
+  }
+  #zko {
+    position: fixed;
+    bottom: 20px;
+    left: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    letter-spacing: 3px;
+    color: #39ff14;
+    text-decoration: none;
+    cursor: pointer;
+  }
+  #ops {
+    position: fixed;
+    bottom: 20px;
+    right: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    letter-spacing: 3px;
+    color: #39ff14;
+  }
+  #speed {
+    position: fixed;
+    bottom: 40px;
+    right: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    letter-spacing: 3px;
+    color: #39ff14;
+    user-select: none;
+  }
+  #speed span { cursor: pointer; }
+  #tgkeys {
+    position: fixed;
+    top: 54px;
+    left: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    letter-spacing: 3px;
+    color: #39ff14;
+    display: flex;
+    gap: 1ch;
+  }
+  #akey { cursor: pointer; }
+  #grain-cv {
+    position: fixed; inset: 0; width: 100%; height: 100%;
+    pointer-events: none; z-index: 5;
+  }
+  #ckey {
+    position: fixed;
+    top: 68px;
+    right: 24px;
+    width: 1em;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    line-height: 1.4;
+    color: #39ff14;
+    text-align: center;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div class="scanline"></div>
+<div class="vignette"></div>
+<button id="btn"></button>
+<div id="tgkeys"><div id="akey">T</div></div>
+<div id="legend"></div>
+<div id="ops"></div>
+<div id="speed"><span id="slower">&lt;</span> <span id="faster">&gt;</span></div>
+<div id="ckey">C</div>
+<a id="zko" href="https://zko.io" target="_blank" rel="noopener"></a>
+<canvas id="grain-cv"></canvas>
+<canvas id="canvas"></canvas>
+<script>
+  const canvas = document.getElementById('canvas');
+  const ctx    = canvas.getContext('2d');
+
+  let W, H;
+  function resize() {
+    W = canvas.width  = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  // ── Character pools ───────────────────────────────────────
+  const POOL = '.,:;+*#@0123456789';
+  const rc = () => POOL[Math.floor(Math.random() * POOL.length)];
+  const rb = () => String.fromCodePoint(0x2801 + Math.floor(Math.random() * 255));
+
+  // ── VGA 16-color palette ──────────────────────────────────
+  const VGA = [
+    '#000000','#0000AA','#00AA00','#00AAAA',
+    '#AA0000','#AA00AA','#AA5500','#AAAAAA',
+    '#555555','#5555FF','#55FF55','#55FFFF',
+    '#FF5555','#FF55FF','#FFFF55','#FFFFFF',
+  ];
+
+  // ── Lissajous ratios ─────────────────────────────────────
+  const RATIOS = [[1,2],[1,3],[2,3],[3,4],[3,5],[4,5],[2,5],[5,6],[3,7],[5,7],[4,7]];
+
+  // ── State ─────────────────────────────────────────────────
+  let ratioIdx      = 0;
+  let delta         = 0;
+  let ampLevel      = 0;
+  let triggerFlash  = 0;
+  let lineColor     = '#39ff14';
+  let intersectCount = 0;
+  let displaySeg     = null;
+  let lastIsxTs      = -9999;
+  let lockedCurveT   = null;
+  let colorIdx     = 10;
+  let uiColorIdx   = 10;
+  let cycleMs      = 280;
+  let lastTs       = null;
+  let parentAudio  = null;
+
+  // ── Audio ─────────────────────────────────────────────────
+  let micActive = false, micStream = null, audioCtx = null, analyser = null, timeDomain = null;
+  let ampWasHigh = false;
+
+  // ── Trigger ───────────────────────────────────────────────
+  function updateRatioLabel() {
+    const [a, b] = RATIOS[ratioIdx];
+    opsEl.textContent = rc() + ' ' + a + ':' + b + ' ' + rc();
+  }
+
+  // ── Intersection computation ──────────────────────────────
+  const N_ISX = 400;
+
+  function segIsect([x1,y1],[x2,y2],[x3,y3],[x4,y4]) {
+    const ax=x2-x1, ay=y2-y1, bx=x4-x3, by=y4-y3;
+    const den = ax*by - ay*bx;
+    if (Math.abs(den) < 1e-10) return null;
+    const t = ((x3-x1)*by - (y3-y1)*bx) / den;
+    const u = ((x3-x1)*ay - (y3-y1)*ax) / den;
+    if (t > 0.05 && t < 0.95 && u > 0.05 && u < 0.95)
+      return { px: x1+t*ax, py: y1+t*ay, t };
+    return null;
+  }
+
+  function computeIntersections(d, pickNew) {
+    const [a, b] = RATIOS[ratioIdx];
+    const ps = [];
+    for (let i = 0; i <= N_ISX; i++) {
+      const t = (i / N_ISX) * Math.PI * 2;
+      ps.push([Math.sin(a * t + d), Math.sin(b * t)]);
+    }
+    const found = [];
+    for (let i = 0; i < N_ISX; i++) {
+      for (let j = i + 2; j < N_ISX; j++) {
+        if (i === 0 && j === N_ISX - 1) continue;
+        const r = segIsect(ps[i], ps[i+1], ps[j], ps[j+1]);
+        if (r) {
+          const dup = found.some(f => (f.px-r.px)**2 + (f.py-r.py)**2 < 0.01);
+          if (!dup) found.push({ px: r.px, py: r.py, i, j });
+        }
+      }
+    }
+    intersectCount = found.length;
+    const segStillValid = displaySeg && found.some(f => f.i === displaySeg.i && f.j === displaySeg.j);
+    if (pickNew || !segStillValid)
+      displaySeg = found.length ? found[Math.floor(Math.random() * found.length)] : null;
+  }
+
+  function triggerLissajous() {
+    ratioIdx = (ratioIdx + 1) % RATIOS.length;
+    triggerFlash = 1.0;
+    updateRatioLabel();
+    displaySeg   = null;
+    lockedCurveT = null;
+    lastIsxTs    = -9999;
+  }
+
+  // ── Render ────────────────────────────────────────────────
+  const N_PTS = 1200;
+
+  function frame(ts) {
+    if (!lastTs) lastTs = ts;
+    const dt = Math.min((ts - lastTs) / 1000, 0.05);
+    lastTs = ts;
+
+    // Audio processing
+    if (micActive || parentAudio) {
+      let rms;
+      if (micActive) {
+        analyser.getByteTimeDomainData(timeDomain);
+        let sq = 0;
+        for (let k = 0; k < timeDomain.length; k++) {
+          const d = timeDomain[k] / 255 - 0.5; sq += d * d;
+        }
+        rms = Math.sqrt(sq / timeDomain.length);
+      } else { rms = parentAudio.rms; }
+      ampLevel += (rms * 6 - ampLevel) * 0.15;
+      if (rms > 0.05 && !ampWasHigh) { triggerLissajous(); ampWasHigh = true; }
+      else if (rms < 0.03) { ampWasHigh = false; }
+    } else {
+      ampLevel *= 0.92;
+    }
+
+    // Advance delta
+    const deltaSpeed = 0.014 * (140 / cycleMs);
+    delta += deltaSpeed;
+
+    // Recompute intersections with current delta every ~300ms
+    if (ts - lastIsxTs > 300) { lastIsxTs = ts; computeIntersections(delta, false); }
+
+    // Decay trigger flash
+    triggerFlash *= 0.88;
+
+    // Build Lissajous points
+    const [a, b] = RATIOS[ratioIdx];
+    const scale = Math.min(W, H) * (0.256 + ampLevel * 0.048);
+    const cx = W / 2, cy = H / 2;
+    const pts = [];
+    for (let i = 0; i <= N_PTS; i++) {
+      const t = (i / N_PTS) * Math.PI * 2;
+      const x = cx + Math.sin(a * t + delta) * scale;
+      const y = cy + Math.sin(b * t) * scale;
+      pts.push([x, y]);
+    }
+
+    ctx.clearRect(0, 0, W, H);
+
+    // 3-pass glow render
+    const flashBoost = triggerFlash * 0.25;
+    const passes = [
+      { blur: 14, alpha: 0.18 + flashBoost, lw: 3.0 },
+      { blur: 4,  alpha: 0.48 + flashBoost, lw: 1.5 },
+      { blur: 0,  alpha: 0.90 + flashBoost, lw: 0.8 },
+    ];
+
+    for (const { blur, alpha, lw } of passes) {
+      ctx.strokeStyle = lineColor;
+      ctx.shadowColor = lineColor;
+      ctx.shadowBlur  = blur;
+      ctx.lineWidth   = lw;
+      ctx.globalAlpha = Math.min(1, alpha);
+      ctx.beginPath();
+      ctx.moveTo(pts[0][0], pts[0][1]);
+      for (let k = 1; k < pts.length; k++) {
+        ctx.lineTo(pts[k][0], pts[k][1]);
+      }
+      ctx.closePath();
+      ctx.stroke();
+    }
+
+    // Intersection count label — recompute position each frame with current delta
+    if (displaySeg && intersectCount > 0) {
+      const [a, b] = RATIOS[ratioIdx];
+      const dt = Math.PI * 2 / N_ISX;
+      const ti = displaySeg.i * dt, tj = displaySeg.j * dt;
+      const p0 = [cx + Math.sin(a*(ti)    + delta)*scale, cy + Math.sin(b*(ti))   *scale];
+      const p1 = [cx + Math.sin(a*(ti+dt) + delta)*scale, cy + Math.sin(b*(ti+dt))*scale];
+      const p2 = [cx + Math.sin(a*(tj)    + delta)*scale, cy + Math.sin(b*(tj))   *scale];
+      const p3 = [cx + Math.sin(a*(tj+dt) + delta)*scale, cy + Math.sin(b*(tj+dt))*scale];
+      const r = segIsect(p0, p1, p2, p3);
+      if (r && lockedCurveT === null)
+        lockedCurveT = displaySeg.i * (Math.PI * 2 / N_ISX) + r.t * (Math.PI * 2 / N_ISX);
+      const [a2, b2] = RATIOS[ratioIdx];
+      const dpx = lockedCurveT !== null ? cx + Math.sin(a2 * lockedCurveT + delta) * scale : (p0[0]+p1[0]) / 2;
+      const dpy = lockedCurveT !== null ? cy + Math.sin(b2 * lockedCurveT)         * scale : (p0[1]+p1[1]) / 2;
+      const uiCol = VGA[uiColorIdx];
+      ctx.fillStyle    = uiCol;
+      ctx.shadowColor  = uiCol;
+      ctx.shadowBlur   = 6;
+      ctx.globalAlpha  = 0.85;
+      ctx.font         = "13px 'Share Tech Mono', monospace";
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('*', dpx, dpy);
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(String(intersectCount), dpx + 8, dpy - 8);
+    }
+
+    ctx.globalAlpha = 1;
+    ctx.shadowBlur  = 0;
+
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+
+  // ── Grain ─────────────────────────────────────────────────
+  let grainOn = true;
+  const grainEl = document.getElementById('grain-cv');
+  const grainCx = grainEl.getContext('2d');
+  let grainImg = null;
+  function drawGrainFrame() {
+    if (!grainOn) return;
+    const gW = Math.ceil(window.innerWidth  / 2);
+    const gH = Math.ceil(window.innerHeight / 2);
+    if (grainEl.width !== gW || grainEl.height !== gH) {
+      grainEl.width = gW; grainEl.height = gH;
+      grainImg = grainCx.createImageData(gW, gH);
+    }
+    const data = grainImg.data;
+    for (let i = 0; i < data.length; i += 4) {
+      const v = Math.random() * 255 | 0;
+      data[i] = data[i+1] = data[i+2] = v;
+      data[i+3] = Math.random() * 30 | 0;
+    }
+    grainCx.putImageData(grainImg, 0, 0);
+    requestAnimationFrame(drawGrainFrame);
+  }
+  function toggleGrain() {
+    grainOn = !grainOn;
+    document.getElementById('gkey').style.opacity = grainOn ? '0.4' : '';
+    if (grainOn) drawGrainFrame();
+  }
+  window.addEventListener('keydown', e => { if (e.key === 'g' || e.key === 'G') toggleGrain(); });
+  drawGrainFrame();
+
+  // ── Canvas click ──────────────────────────────────────────
+  canvas.addEventListener('click', triggerLissajous);
+  document.getElementById('akey').addEventListener('click', triggerLissajous);
+
+  // ── Mic toggle ────────────────────────────────────────────
+  const btn = document.getElementById('btn');
+  btn.addEventListener('click', async () => {
+    if (micActive) {
+      micActive = false;
+      btn.style.opacity = '0.4';
+      micStream?.getTracks().forEach(t => t.stop());
+      audioCtx?.close();
+      micStream = audioCtx = analyser = timeDomain = null;
+      ampLevel = 0;
+      return;
+    }
+    try {
+      micStream  = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      audioCtx   = new (window.AudioContext || window.webkitAudioContext)();
+      const src  = audioCtx.createMediaStreamSource(micStream);
+      analyser   = audioCtx.createAnalyser();
+      analyser.fftSize               = 2048;
+      analyser.smoothingTimeConstant = 0.5;
+      src.connect(analyser);
+      timeDomain = new Uint8Array(analyser.fftSize);
+      micActive  = true;
+      btn.style.opacity = '';
+    } catch { /* permission denied */ }
+  });
+
+  // ── C-key modifier ────────────────────────────────────────
+  let cHeld = false;
+
+  // ── VGA legend ────────────────────────────────────────────
+  const legendEl    = document.getElementById('legend');
+  const legendSpans = VGA.map(col => {
+    const s = document.createElement('span');
+    s.style.color  = col;
+    s.style.cursor = 'pointer';
+    s.textContent  = rc();
+    s.addEventListener('click', () => {
+      if (cHeld) {
+        btn.style.color                               = col;
+        opsEl.style.color                             = col;
+        zkoEl.style.color                             = col;
+        document.getElementById('ckey').style.color   = col;
+        document.getElementById('speed').style.color  = col;
+        document.getElementById('tgkeys').style.color = col;
+      } else {
+        lineColor = col;
+        colorIdx  = VGA.indexOf(col);
+      }
+    });
+    legendEl.appendChild(s);
+    return s;
+  });
+
+  const zkoEl = document.getElementById('zko');
+  const opsEl = document.getElementById('ops');
+
+  zkoEl.textContent = rc()+rc()+rc()+rc();
+  btn.textContent   = rb();
+  updateRatioLabel();
+
+  // ── Braille btn cycling ───────────────────────────────────
+  setInterval(() => { btn.textContent = rb(); }, 140);
+
+  // ── UI label flickering (200ms) ───────────────────────────
+  setInterval(() => {
+    updateRatioLabel();
+    zkoEl.textContent = rc()+rc()+rc()+rc();
+    legendSpans.forEach(s => s.textContent = rc());
+  }, 200);
+
+  // ── Speed UI ─────────────────────────────────────────────
+  function updateSpeedUI() {
+    const sl = document.getElementById('slower');
+    const fa = document.getElementById('faster');
+    sl.style.opacity       = cycleMs >= 560 ? '0.4' : '1';
+    sl.style.pointerEvents = cycleMs >= 560 ? 'none' : '';
+    fa.style.opacity       = cycleMs <= 140 ? '0.4' : '1';
+    fa.style.pointerEvents = cycleMs <= 140 ? 'none' : '';
+  }
+  updateSpeedUI();
+
+  document.getElementById('slower').addEventListener('click', () => {
+    cycleMs = Math.min(560, cycleMs + 140);
+    updateSpeedUI();
+  });
+  document.getElementById('faster').addEventListener('click', () => {
+    cycleMs = Math.max(140, cycleMs - 140);
+    updateSpeedUI();
+  });
+
+  // ── Keyboard ─────────────────────────────────────────────
+  window.addEventListener('keydown', e => {
+    if (e.isTrusted) window.parent?.postMessage({ type: 'childKey', key: e.key, shiftKey: !!e.shiftKey }, '*');
+    if (e.key === 't' || e.key === 'T') {
+      triggerLissajous();
+    } else if (e.key === 'ArrowLeft' && !cHeld) {
+      cycleMs = Math.min(560, cycleMs + 140);
+      updateSpeedUI();
+    } else if (e.key === 'ArrowRight' && !cHeld) {
+      cycleMs = Math.max(140, cycleMs - 140);
+      updateSpeedUI();
+    } else if (e.key === '<' && !e.shiftKey) {
+      cycleMs = Math.min(560, cycleMs + 140);
+      updateSpeedUI();
+    } else if (e.key === '>' && !e.shiftKey) {
+      cycleMs = Math.max(140, cycleMs - 140);
+      updateSpeedUI();
+    } else if (!cHeld && e.key === 'ArrowUp') {
+      colorIdx  = (colorIdx - 1 + VGA.length) % VGA.length;
+      lineColor = VGA[colorIdx];
+    } else if (!cHeld && e.key === 'ArrowDown') {
+      colorIdx  = (colorIdx + 1) % VGA.length;
+      lineColor = VGA[colorIdx];
+    } else if (cHeld && e.key === 'ArrowUp') {
+      uiColorIdx = (uiColorIdx - 1 + VGA.length) % VGA.length;
+      btn.style.color                               = VGA[uiColorIdx];
+      opsEl.style.color                             = VGA[uiColorIdx];
+      zkoEl.style.color                             = VGA[uiColorIdx];
+      document.getElementById('ckey').style.color   = VGA[uiColorIdx];
+      document.getElementById('speed').style.color  = VGA[uiColorIdx];
+      document.getElementById('tgkeys').style.color = VGA[uiColorIdx];
+    } else if (cHeld && e.key === 'ArrowDown') {
+      uiColorIdx = (uiColorIdx + 1) % VGA.length;
+      btn.style.color                               = VGA[uiColorIdx];
+      opsEl.style.color                             = VGA[uiColorIdx];
+      zkoEl.style.color                             = VGA[uiColorIdx];
+      document.getElementById('ckey').style.color   = VGA[uiColorIdx];
+      document.getElementById('speed').style.color  = VGA[uiColorIdx];
+      document.getElementById('tgkeys').style.color = VGA[uiColorIdx];
+    } else if (e.key === 'c' || e.key === 'C') {
+      cHeld = true;
+    }
+  });
+
+  window.addEventListener('keyup', e => {
+    if (e.isTrusted) window.parent?.postMessage({ type: 'childKeyup', key: e.key }, '*');
+    if (e.key === 'c' || e.key === 'C') cHeld = false;
+  });
+
+  // ── postMessage bridge ────────────────────────────────────
+  window.addEventListener('message', e => {
+    if (e.data?.type === 'key') {
+      if (e.data.cHeld !== undefined) cHeld = !!e.data.cHeld;
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: e.data.key, shiftKey: !!e.data.shiftKey, bubbles: true }));
+    }
+    else if (e.data?.type === 'keyup')
+      window.dispatchEvent(new KeyboardEvent('keyup', { key: e.data.key, bubbles: true }));
+    else if (e.data?.type === 'audioData')
+      parentAudio = e.data;
+  });
+
+  // Randomize colors on load
+  (function() {
+    const GOOD = [6,11,13,14,15];
+    colorIdx  = GOOD[Math.floor(Math.random() * GOOD.length)];
+    lineColor = VGA[colorIdx];
+    const _uiPool = GOOD.filter(i => i !== colorIdx);
+    uiColorIdx = _uiPool[Math.floor(Math.random() * _uiPool.length)];
+    const _uc = VGA[uiColorIdx];
+    if (btn)   btn.style.color   = _uc;
+    if (opsEl) opsEl.style.color = _uc;
+    if (zkoEl) zkoEl.style.color = _uc;
+    const _ck = document.getElementById('ckey');
+    const _tk = document.getElementById('tgkeys');
+    const _sp = document.getElementById('speed');
+    if (_ck) _ck.style.color = _uc;
+    if (_tk) _tk.style.color = _uc;
+    if (_sp) _sp.style.color = _uc;
+  })();
+</script>
+</body>
+</html>

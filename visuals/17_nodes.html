@@ -1,0 +1,651 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Nodes</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #000;
+    height: 100vh;
+    overflow: hidden;
+    font-family: 'Share Tech Mono', monospace;
+  }
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: radial-gradient(ellipse at center, #0a0f00 0%, #000 70%);
+    z-index: 0;
+  }
+  #cv {
+    position: fixed;
+    inset: 0;
+    z-index: 1;
+  }
+  .scanline {
+    position: fixed;
+    inset: 0;
+    background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.08) 2px, rgba(0,0,0,0.08) 4px);
+    pointer-events: none;
+    z-index: 2;
+  }
+  .vignette {
+    position: fixed;
+    inset: 0;
+    background: radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.7) 100%);
+    pointer-events: none;
+    z-index: 3;
+  }
+  #btn {
+    all: unset;
+    position: fixed;
+    top: 20px;
+    left: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    color: #39ff14;
+    letter-spacing: 3px;
+    cursor: pointer;
+  }
+  #rgkeys {
+    position: fixed;
+    top: 54px;
+    left: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    letter-spacing: 3px;
+    color: #39ff14;
+    display: flex;
+    gap: 1ch;
+  }
+  #rkey { cursor: pointer; }
+  #grain-cv {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 5;
+  }
+  #legend {
+    position: fixed;
+    top: 20px;
+    right: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    display: grid;
+    grid-template-columns: repeat(8, 1em);
+    gap: 4px 6px;
+    line-height: 1.4;
+    text-align: center;
+  }
+  #zko {
+    position: fixed;
+    bottom: 20px;
+    left: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    letter-spacing: 3px;
+    color: #39ff14;
+    text-decoration: none;
+    cursor: pointer;
+  }
+  #ops {
+    position: fixed;
+    bottom: 20px;
+    right: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    letter-spacing: 3px;
+    color: #39ff14;
+  }
+  #speed {
+    position: fixed;
+    bottom: 40px;
+    right: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    letter-spacing: 3px;
+    color: #39ff14;
+    user-select: none;
+  }
+  #speed span { cursor: pointer; }
+  #ckey {
+    position: fixed;
+    top: 68px;
+    right: 24px;
+    width: 1em;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    line-height: 1.4;
+    color: #39ff14;
+    text-align: center;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div class="scanline"></div>
+<div class="vignette"></div>
+<button id="btn"></button>
+<div id="rgkeys"><div id="rkey">T</div></div>
+<canvas id="grain-cv"></canvas>
+<div id="legend"></div>
+<div id="ops"></div>
+<div id="speed"><span id="slower">&lt;</span> <span id="faster">&gt;</span></div>
+<div id="ckey">C</div>
+<a id="zko" href="https://zko.io" target="_blank" rel="noopener"></a>
+<canvas id="cv"></canvas>
+<script>
+  // ── canvas setup ──────────────────────────────────────────────
+  const cv = document.getElementById('cv');
+  const cx = cv.getContext('2d');
+  function resize() { cv.width = window.innerWidth; cv.height = window.innerHeight; }
+  resize();
+  window.addEventListener('resize', resize);
+
+  // ── audio state ───────────────────────────────────────────────
+  let analyser = null, timeDomain = null, micActive = false, micStream = null, audioCtx = null;
+  let parentAudio = null;
+
+  // ── animation state ───────────────────────────────────────────
+  let ts        = 0;
+  let ampLevel  = 0;
+  let lineColor = '#39ff14';
+
+  // ── node layout (fractions of W/H) ───────────────────────────
+  const FX_F = 0.22;   // factor x
+  const OX_F = 0.58;   // observed center x
+  const EX_F = 0.78;   // error line end x
+  const FY_F = [0.367, 0.459, 0.551, 0.643];
+
+  // frequency bands: bass, low-mid, high-mid, treble
+  const BAND_RANGES = [[20,300],[300,2000],[2000,6000],[6000,20000]];
+  const FACTOR_NAMES = ['SC','SS','SR','FC'];
+  let bandVals  = [0, 0, 0, 0];   // 0–99 displayed values
+  let freqData  = null;
+  let bandBins  = null;
+  let snapVals  = [0, 0, 0, 0];   // per-factor divided values (updated every 1s)
+
+  // threshold crossing lines
+  const THRESHOLDS = [12, 28, 48, 68];
+  const getBandLevel = v => THRESHOLDS.filter(t => v >= t).length;
+  let prevBandLevels = [0, 0, 0, 0];
+  let crossLines = [];  // {fi, obs, alpha}
+
+  const OBS_GROUPS = [
+    [ // sc — 4 items
+      {l:'R6', w:.566,e:.680},{l:'R11',w:.425,e:.819},
+      {l:'R22',w:.677,e:.541},{l:'R25',w:.471,e:.778},
+    ],
+    [ // ss — 3 items
+      {l:'R2', w:.548,e:.699},{l:'R8', w:.401,e:.839},
+      {l:'R13',w:.628,e:.606},
+    ],
+    [ // sr — 4 items
+      {l:'R3', w:.683,e:.534},{l:'R9', w:.608,e:.630},
+      {l:'R19',w:.693,e:.520},{l:'R28',w:.598,e:.643},
+    ],
+    [ // fc — 5 items
+      {l:'R5', w:.622,e:.613},{l:'R10',w:.727,e:.472},{l:'R15',w:.662,e:.561},
+      {l:'R21',w:.465,e:.784},{l:'R24',w:.807,e:.349},
+    ],
+  ];
+
+  // assign evenly-spaced y fractions across all 27 observed items
+  const ALL_OBS = OBS_GROUPS.flat();
+  ALL_OBS.forEach((o, i) => { o.yf = 0.307 + i * (0.386 / (ALL_OBS.length - 1)); });
+  OBS_GROUPS.forEach((grp, fi) => grp.forEach(o => { o.fi = fi; }));
+  const itemTotals = OBS_GROUPS.map(grp => new Array(grp.length).fill(0));
+
+  // residual correlations between factors (right-side curved arcs)
+  const CORRS = [
+    { a:0, b:2, r:0.224 },  // sc ↔ sr
+    { a:2, b:3, r:0.260 },  // sr ↔ fc
+    { a:0, b:3, r:0.180 },  // sc ↔ fc
+  ];
+
+  // ── offscreen canvas (draw once, composite twice for glow) ────
+  const offCv = document.createElement('canvas');
+  const offCx = offCv.getContext('2d');
+
+  function drawScene(ctx, W, H) {
+    const fs   = 14;
+    const fr   = Math.min(W, H) * 0.032;
+    const fp   = 1 + ampLevel * 0.50;
+    const ow   = 44;
+    const oh   = 18;
+    const doff = -ts * 0.016 * (1 + ampLevel * 2.5);
+
+    function flickerAlpha(baseMin, baseMax, dropoutChance, doFlicker) {
+      if (!doFlicker) return Math.min(1, baseMax * 0.85 + Math.min(0.15, ampLevel * 0.2));
+      if (Math.random() < dropoutChance) return Math.random() * 0.12;
+      const base = baseMin + Math.random() * (baseMax - baseMin);
+      return Math.min(1, base + Math.min(0.25, ampLevel * 0.35));
+    }
+    const flickerSet = new Set();
+    while (flickerSet.size < Math.round(ALL_OBS.length / 3))
+      flickerSet.add(Math.floor(Math.random() * ALL_OBS.length));
+    let obsIdx = 0;
+
+    ctx.strokeStyle   = lineColor;
+    ctx.fillStyle     = lineColor;
+    ctx.font          = `${fs}px 'Share Tech Mono', monospace`;
+    ctx.letterSpacing = '3px';
+
+    // ── factors ───────────────────────────────────────────────
+    bandVals.forEach((val, fi) => {
+      const fx = FX_F * W, fy = FY_F[fi] * H;
+      const label = String(Math.round(val)).padStart(2, '0');
+
+      // factor number + underline
+      ctx.globalAlpha  = 0.88;
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(label, fx, fy);
+      const hh = fr * fp;
+      ctx.lineWidth = 1.0;
+      ctx.beginPath();
+      const vx = fx - fr - 4 - ampLevel * 4;
+      ctx.moveTo(vx, fy - fr);
+      ctx.lineTo(vx, fy + fr);
+      ctx.stroke();
+
+      // factor name at 45° upper-right of circle
+      const labelR   = fr * fp + 5;
+      ctx.globalAlpha  = 0.55;
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(FACTOR_NAMES[fi],
+        fx + labelR * Math.cos(-Math.PI / 4),
+        fy + labelR * Math.sin(-Math.PI / 4));
+
+      // ── observed items ───────────────────────────────────
+      OBS_GROUPS[fi].forEach((obs, oi) => {
+        const ox  = OX_F * W;
+        const jy  = ampLevel > 0.05 ? (Math.random() - 0.5) * ampLevel * 14 : 0;
+        const oy  = obs.yf * H + jy;
+        const ex  = EX_F * W;
+
+        // crossLine flash: find if any crossLine targets this obs
+        const flash = crossLines.find(l => l.obs === obs);
+
+        // factor → observed edge
+        ctx.globalAlpha = 0.60 + (flash ? flash.alpha * 0.4 : 0);
+        ctx.lineWidth   = 1.0 + (flash ? flash.alpha * 2 : 0);
+        ctx.setLineDash([3, 6]);
+        ctx.lineDashOffset = doff * 10;
+        ctx.beginPath();
+        ctx.moveTo(fx + fr * fp, fy);
+        ctx.lineTo(ox - ow / 2, oy);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // observed rectangle — glow when threshold crossed
+        const boxAlpha = 0.88 + (flash ? flash.alpha * 0.12 : 0);
+        const boxWidth = 0.8  + (flash ? flash.alpha * 2.5  : 0);
+        ctx.globalAlpha = boxAlpha;
+        ctx.lineWidth   = boxWidth;
+        ctx.strokeRect(ox - ow / 2, oy - oh / 2, ow, oh);
+        if (flash) {
+          ctx.globalAlpha = flash.alpha * 0.18;
+          ctx.fillRect(ox - ow / 2, oy - oh / 2, ow, oh);
+        }
+        ctx.textAlign    = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.globalAlpha  = flickerAlpha(0.45, 0.88, 0.07, flickerSet.has(obsIdx++));
+        ctx.fillText('R' + String(itemTotals[fi][oi]).padStart(2, '0'), ox, oy);
+
+        // error line + value
+        const errVal = val / 99;
+        ctx.globalAlpha = Math.min(1, (0.24 + errVal * 0.72) * 1.2);
+        ctx.lineWidth   = 0.6;
+        ctx.beginPath();
+        ctx.moveTo(ox + ow / 2, oy);
+        ctx.lineTo(ex, oy);
+        ctx.stroke();
+
+        ctx.globalAlpha = 0.30 + errVal * 0.40;
+        ctx.textAlign    = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(errVal.toFixed(2), ex + 3, oy);
+      });
+    });
+
+    // ── residual correlation arcs ────────────────────────────
+    CORRS.forEach((corr, ci) => {
+      const fxr   = FX_F * W + fr * fp + 10;
+      const y1    = FY_F[corr.a] * H;
+      const y2    = FY_F[corr.b] * H;
+      const bulge = (y2 - y1) * 0.55;
+
+      ctx.globalAlpha = 0.60;
+      ctx.lineWidth   = 1.4;
+      ctx.setLineDash([3, 6]);
+      ctx.lineDashOffset = doff * 10;
+      ctx.beginPath();
+      ctx.moveTo(fxr, y1);
+      ctx.bezierCurveTo(fxr + bulge, y1, fxr + bulge, y2, fxr, y2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      const arcVal = (bandVals[corr.a] + bandVals[corr.b]) / 198;
+      ctx.globalAlpha = 0.34 + arcVal * 0.40;
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'middle';
+      const arcLabelY = ci === 0 ? y1 + (y2 - y1) * 0.20 : (y1 + y2) / 2;
+      ctx.fillText(arcVal.toFixed(2), fxr + bulge + 4, arcLabelY);
+    });
+  }
+
+  // ── frame loop ────────────────────────────────────────────────
+  function frame() {
+    if (micActive || parentAudio) {
+      let rms, fd;
+      if (micActive) {
+        analyser.getByteTimeDomainData(timeDomain);
+        let ss = 0;
+        for (let i = 0; i < timeDomain.length; i++) {
+          const d = timeDomain[i] / 255 - 0.5;
+          ss += d * d;
+        }
+        rms = Math.sqrt(ss / timeDomain.length);
+        analyser.getByteFrequencyData(freqData);
+        fd = freqData;
+      } else { rms = parentAudio.rms; fd = parentAudio.freqData; }
+      ampLevel += (rms * 9 - ampLevel) * 0.22;
+      if (micActive && bandBins) {
+        bandBins.forEach(([s, e], i) => {
+          let sum = 0;
+          for (let j = s; j < e; j++) sum += fd[j];
+          const energy = (sum / (e - s)) / 255 * 99;
+          bandVals[i] += (energy - bandVals[i]) * 0.28;
+        });
+      } else if (fd) {
+        const len = fd.length;
+        const slices = [
+          [0, Math.floor(len * 0.07)],
+          [Math.floor(len * 0.07), Math.floor(len * 0.30)],
+          [Math.floor(len * 0.30), Math.floor(len * 0.75)],
+          [Math.floor(len * 0.75), len],
+        ];
+        slices.forEach(([s, e], i) => {
+          let sum = 0;
+          for (let j = s; j < e; j++) sum += fd[j];
+          const energy = (sum / (e - s)) / 255 * 99;
+          bandVals[i] += (energy - bandVals[i]) * 0.28;
+        });
+      }
+    } else {
+      ampLevel *= 0.93;
+      bandVals = bandVals.map(v => v * 0.95);
+    }
+
+    bandVals.forEach((v, fi) => {
+      const lv = getBandLevel(v);
+      if (lv !== prevBandLevels[fi]) {
+        const grp = OBS_GROUPS[Math.floor(Math.random() * OBS_GROUPS.length)];
+        const obs = grp[Math.floor(Math.random() * grp.length)];
+        crossLines.push({ fi, obs, alpha: 1.0 });
+        prevBandLevels[fi] = lv;
+      }
+    });
+    crossLines = crossLines.filter(l => l.alpha > 0.02);
+    crossLines.forEach(l => { l.alpha *= 0.88; });
+
+    const W = cv.width, H = cv.height;
+
+    // resize offscreen if needed
+    if (offCv.width !== W || offCv.height !== H) { offCv.width = W; offCv.height = H; }
+
+    // draw scene once to offscreen
+    offCx.clearRect(0, 0, W, H);
+    offCx.strokeStyle = lineColor;
+    offCx.fillStyle   = lineColor;
+    offCx.font        = `13px 'Share Tech Mono', monospace`;
+    drawScene(offCx, W, H);
+
+    // composite: glow layer (blurred) + crisp layer
+    cx.clearRect(0, 0, W, H);
+    cx.save();
+    cx.filter     = 'blur(10px)';
+    cx.globalAlpha = 0.50;
+    cx.drawImage(offCv, 0, 0);
+    cx.restore();
+    cx.globalAlpha = 0.92;
+    cx.drawImage(offCv, 0, 0);
+    cx.globalAlpha = 1;
+
+    ts++;
+    requestAnimationFrame(frame);
+  }
+
+  frame();
+
+  // ── snap: divide bandVals by group size every 1s ──────────────
+  setInterval(() => {
+    OBS_GROUPS.forEach((grp, fi) => {
+      snapVals[fi] = Math.round(bandVals[fi]) / grp.length;
+      grp.forEach((obs, oi) => {
+        itemTotals[fi][oi] = (itemTotals[fi][oi] + Math.round(snapVals[fi])) % 100;
+      });
+    });
+  }, 1000);
+
+  // ── A key / click: inject sound-like impulse ──────────────────
+  function triggerPulse() {
+    ampLevel  = Math.min(4, ampLevel + 2.5);
+    bandVals  = bandVals.map(v => Math.min(99, v + 60));
+  }
+  window.addEventListener('keydown', e => { if (e.key === 't' || e.key === 'T') triggerPulse(); });
+  document.getElementById('rkey').addEventListener('click', triggerPulse);
+  cv.addEventListener('click', triggerPulse);
+
+  // ── grain ─────────────────────────────────────────────────────
+  let grainOn  = true;
+  const grainEl = document.getElementById('grain-cv');
+  const grainCx = grainEl.getContext('2d');
+  let grainImg  = null;
+  function drawGrainFrame() {
+    if (!grainOn) return;
+    const gW = Math.ceil(window.innerWidth  / 2);
+    const gH = Math.ceil(window.innerHeight / 2);
+    if (grainEl.width !== gW || grainEl.height !== gH) {
+      grainEl.width  = gW;
+      grainEl.height = gH;
+      grainImg = grainCx.createImageData(gW, gH);
+    }
+    const data = grainImg.data;
+    for (let i = 0; i < data.length; i += 4) {
+      const v = Math.random() * 255 | 0;
+      data[i] = data[i+1] = data[i+2] = v;
+      data[i+3] = Math.random() * 30 | 0;
+    }
+    grainCx.putImageData(grainImg, 0, 0);
+    requestAnimationFrame(drawGrainFrame);
+  }
+  function toggleGrain() {
+    grainOn = !grainOn;
+    if (grainOn) drawGrainFrame();
+  }
+  window.addEventListener('keydown', e => { if (e.key === 'g' || e.key === 'G') toggleGrain(); });
+  drawGrainFrame();
+
+  // ── mic toggle ────────────────────────────────────────────────
+  const btn = document.getElementById('btn');
+  btn.addEventListener('click', async () => {
+    if (micActive) {
+      micActive = false;
+      btn.style.opacity = '0.4';
+      micStream?.getTracks().forEach(t => t.stop());
+      audioCtx?.close();
+      micStream = audioCtx = analyser = timeDomain = null;
+      freqData = bandBins = null;
+      ampLevel = 0;
+      return;
+    }
+    try {
+      micStream  = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      audioCtx   = new (window.AudioContext || window.webkitAudioContext)();
+      const src  = audioCtx.createMediaStreamSource(micStream);
+      analyser   = audioCtx.createAnalyser();
+      analyser.fftSize               = 2048;
+      analyser.smoothingTimeConstant = 0.5;
+      src.connect(analyser);
+      timeDomain = new Uint8Array(analyser.fftSize);
+      freqData   = new Uint8Array(analyser.frequencyBinCount);
+      const bw   = audioCtx.sampleRate / analyser.fftSize;
+      bandBins   = BAND_RANGES.map(([lo, hi]) => [
+        Math.max(1, Math.floor(lo / bw)),
+        Math.min(analyser.frequencyBinCount - 1, Math.ceil(hi / bw))
+      ]);
+      micActive  = true;
+      btn.style.opacity = '';
+    } catch { /* permission denied */ }
+  });
+
+  // ── C-key modifier ────────────────────────────────────────────
+  let cHeld = false;
+  window.addEventListener('keyup',   e => { if (e.isTrusted) window.parent?.postMessage({ type: 'childKeyup', key: e.key }, '*'); if (e.key==='c'||e.key==='C') cHeld=false; });
+
+  // ── VGA 16-color legend ───────────────────────────────────────
+  const POOL   = '.,:;+*#@0123456789';
+  const PRIMES = ['2','3','5','7','11','13','17','19','/'];
+  const rc  = () => POOL[Math.floor(Math.random() * POOL.length)];
+  const rb  = () => String.fromCodePoint(0x2801 + Math.floor(Math.random() * 255));
+  const rp  = () => PRIMES[Math.floor(Math.random() * PRIMES.length)];
+  const VGA = [
+    '#000000','#0000AA','#00AA00','#00AAAA',
+    '#AA0000','#AA00AA','#AA5500','#AAAAAA',
+    '#555555','#5555FF','#55FF55','#55FFFF',
+    '#FF5555','#FF55FF','#FFFF55','#FFFFFF',
+  ];
+  const legendEl    = document.getElementById('legend');
+  let colorIdx = 10;
+  let uiColorIdx = 10;
+  const legendSpans = VGA.map(col => {
+    const s = document.createElement('span');
+    s.style.color  = col;
+    s.style.cursor = 'pointer';
+    s.textContent  = rc();
+    s.addEventListener('click', () => {
+      if (cHeld) {
+        btn.style.color   = col;
+        opsEl.style.color = col;
+        zkoEl.style.color = col;
+        document.getElementById('ckey').style.color   = col;
+        document.getElementById('rgkeys').style.color = col;
+        document.getElementById('speed').style.color  = col;
+      } else {
+        lineColor = col;
+      }
+    });
+    legendEl.appendChild(s);
+    return s;
+  });
+  const zkoEl = document.getElementById('zko');
+  zkoEl.textContent = rc()+rc()+rc()+rc();
+  btn.textContent   = rb();
+  const opsEl = document.getElementById('ops');
+  opsEl.textContent = rp()+rp();
+  let cycleMs = 140;
+  function cycleFn() {
+    btn.textContent   = rb();
+    opsEl.textContent = rp()+rp();
+    zkoEl.textContent = rc()+rc()+rc()+rc();
+    legendSpans.forEach(s => s.textContent = rc());
+  }
+  let cycleId = setInterval(cycleFn, cycleMs);
+  function updateSpeedUI() {
+    const sl = document.getElementById('slower');
+    const fa = document.getElementById('faster');
+    sl.style.opacity       = cycleMs >= 560 ? '0.4' : '1';
+    sl.style.pointerEvents = cycleMs >= 560 ? 'none' : '';
+    fa.style.opacity       = cycleMs <= 140 ? '0.4' : '1';
+    fa.style.pointerEvents = cycleMs <= 140 ? 'none' : '';
+  }
+  updateSpeedUI();
+  document.getElementById('slower').addEventListener('click', () => {
+    cycleMs = Math.min(560, cycleMs + 140);
+    clearInterval(cycleId); cycleId = setInterval(cycleFn, cycleMs); updateSpeedUI();
+  });
+  document.getElementById('faster').addEventListener('click', () => {
+    cycleMs = Math.max(140, cycleMs - 140);
+    clearInterval(cycleId); cycleId = setInterval(cycleFn, cycleMs); updateSpeedUI();
+  });
+  window.addEventListener('keydown', e => {
+    if (e.isTrusted) window.parent?.postMessage({ type: 'childKey', key: e.key, shiftKey: !!e.shiftKey }, '*');
+    if (e.key === 'c' || e.key === 'C') { cHeld = true; return; }
+    if (e.key === 'ArrowLeft' && !cHeld) {
+      cycleMs = Math.min(560, cycleMs + 140);
+      clearInterval(cycleId); cycleId = setInterval(cycleFn, cycleMs); updateSpeedUI();
+    } else if (e.key === 'ArrowRight' && !cHeld) {
+      cycleMs = Math.max(140, cycleMs - 140);
+      clearInterval(cycleId); cycleId = setInterval(cycleFn, cycleMs); updateSpeedUI();
+    } else if (!cHeld && e.key === 'ArrowUp') {
+      colorIdx = (colorIdx - 1 + VGA.length) % VGA.length;
+      lineColor = VGA[colorIdx];
+    } else if (!cHeld && e.key === 'ArrowDown') {
+      colorIdx = (colorIdx + 1) % VGA.length;
+      lineColor = VGA[colorIdx];
+    } else if (cHeld && e.key === 'ArrowUp') {
+      uiColorIdx = (uiColorIdx - 1 + VGA.length) % VGA.length;
+      btn.style.color   = VGA[uiColorIdx];
+      opsEl.style.color = VGA[uiColorIdx];
+      zkoEl.style.color = VGA[uiColorIdx];
+      document.getElementById('ckey').style.color   = VGA[uiColorIdx];
+      document.getElementById('rgkeys').style.color = VGA[uiColorIdx];
+      document.getElementById('speed').style.color  = VGA[uiColorIdx];
+    } else if (cHeld && e.key === 'ArrowDown') {
+      uiColorIdx = (uiColorIdx + 1) % VGA.length;
+      btn.style.color   = VGA[uiColorIdx];
+      opsEl.style.color = VGA[uiColorIdx];
+      zkoEl.style.color = VGA[uiColorIdx];
+      document.getElementById('ckey').style.color   = VGA[uiColorIdx];
+      document.getElementById('rgkeys').style.color = VGA[uiColorIdx];
+      document.getElementById('speed').style.color  = VGA[uiColorIdx];
+    }
+  });
+
+  // ── postMessage bridge (keyboard from parent window) ──────────
+  window.addEventListener('message', e => {
+    if (e.data?.type === 'key') {
+      if (e.data.cHeld !== undefined) cHeld = !!e.data.cHeld;
+      window.dispatchEvent(new KeyboardEvent('keydown', {key:e.data.key, shiftKey:!!e.data.shiftKey, bubbles:true}));
+    }
+    else if (e.data?.type === 'keyup')
+      window.dispatchEvent(new KeyboardEvent('keyup', {key:e.data.key, bubbles:true}));
+    else if (e.data?.type === 'audioData')
+      parentAudio = e.data;
+  });
+
+  // Randomize colors on load
+  (function() {
+    const GOOD = [6,11,13,14,15];
+    colorIdx  = GOOD[Math.floor(Math.random() * GOOD.length)];
+    lineColor = VGA[colorIdx];
+    const _uiPool = GOOD.filter(i => i !== colorIdx);
+    uiColorIdx = _uiPool[Math.floor(Math.random() * _uiPool.length)];
+    const _uc = VGA[uiColorIdx];
+    if (btn)   btn.style.color   = _uc;
+    if (opsEl) opsEl.style.color = _uc;
+    if (zkoEl) zkoEl.style.color = _uc;
+    const _ck = document.getElementById('ckey');
+    const _tk = document.getElementById('tgkeys');
+    const _sp = document.getElementById('speed');
+    if (_ck) _ck.style.color = _uc;
+    if (_tk) _tk.style.color = _uc;
+    if (_sp) _sp.style.color = _uc;
+  })();
+</script>
+</body>
+</html>

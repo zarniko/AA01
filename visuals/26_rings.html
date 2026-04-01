@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>rings</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; overflow: hidden; }
+    .scanline {
+      position: fixed; inset: 0; pointer-events: none; z-index: 5;
+      background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.06) 2px, rgba(0,0,0,0.06) 4px);
+    }
+    .vignette {
+      position: fixed; inset: 0; pointer-events: none; z-index: 4;
+      background: radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.65) 100%);
+    }
+    canvas { position: fixed; inset: 0; width: 100%; height: 100%; }
+    #grain-cv { z-index: 2; pointer-events: none; }
+    #canvas   { z-index: 1; }
+    #btn {
+      all: unset; position: fixed; top: 20px; left: 24px; z-index: 6;
+      font-family: 'Share Tech Mono', monospace; font-size: 14px;
+      letter-spacing: 3px; cursor: pointer; user-select: none;
+    }
+    #tgkeys {
+      position: fixed; top: 54px; left: 24px; z-index: 6;
+      font-family: 'Share Tech Mono', monospace; font-size: 14px;
+      letter-spacing: 3px; display: flex; gap: 1ch;
+    }
+    #tkey { cursor: pointer; }
+    #legend {
+      position: fixed; top: 20px; right: 24px; z-index: 6;
+      font-family: 'Share Tech Mono', monospace; font-size: 14px;
+      display: grid; grid-template-columns: repeat(8, 1em);
+      gap: 4px 6px; line-height: 1.4; text-align: center;
+    }
+    #ckey {
+      position: fixed; top: 68px; right: 24px; z-index: 6;
+      font-family: 'Share Tech Mono', monospace; font-size: 14px;
+      letter-spacing: 3px; text-align: center;
+      pointer-events: none; user-select: none;
+    }
+    #ops {
+      position: fixed; bottom: 20px; right: 24px; z-index: 6;
+      font-family: 'Share Tech Mono', monospace; font-size: 14px;
+      letter-spacing: 3px; pointer-events: none;
+    }
+    #speed {
+      position: fixed; bottom: 40px; right: 24px; z-index: 6;
+      font-family: 'Share Tech Mono', monospace; font-size: 14px;
+      letter-spacing: 3px; user-select: none;
+    }
+    #speed span { cursor: pointer; }
+    #zko {
+      position: fixed; bottom: 20px; left: 24px; z-index: 6;
+      font-family: 'Share Tech Mono', monospace; font-size: 14px;
+      letter-spacing: 3px; text-decoration: none; cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div class="scanline"></div>
+  <div class="vignette"></div>
+  <button id="btn"></button>
+  <div id="tgkeys"><div id="tkey">T</div></div>
+  <canvas id="grain-cv"></canvas>
+  <div id="legend"></div>
+  <div id="ops"></div>
+  <div id="speed"><span id="slower">&lt;</span> <span id="faster">&gt;</span></div>
+  <div id="ckey">C</div>
+  <a id="zko" href="https://zko.io" target="_blank" rel="noopener"></a>
+  <canvas id="canvas"></canvas>
+<script>
+'use strict';
+
+const VGA = [
+  '#000000','#0000AA','#00AA00','#00AAAA','#AA0000','#AA00AA','#AA5500',
+  '#AAAAAA','#555555','#5555FF','#55FF55','#55FFFF','#FF5555','#FF55FF',
+  '#FFFF55','#FFFFFF'
+];
+const CHARS = '.,:;+*#@0123456789';
+function rc() { return CHARS[Math.random() * CHARS.length | 0]; }
+function rb() { return String.fromCodePoint(0x2801 + Math.floor(Math.random() * 255)); }
+
+const canvas = document.getElementById('canvas'), ctx = canvas.getContext('2d');
+const gCvs = document.getElementById('grain-cv'), gCtx = gCvs.getContext('2d');
+
+const btn   = document.getElementById('btn');
+const opsEl = document.getElementById('ops');
+const zkoEl = document.getElementById('zko');
+const legEl = document.getElementById('legend');
+let legendSpans = [];
+
+let W, H;
+let colorIdx = 10, lineColor = VGA[10];
+let uiColorIdx = 14;
+let cHeld = false;
+let micActive = false, micStream, audioCtx, analyser, timeDomain;
+let ampLevel = 0, ampWasHigh = false;
+let cycleMs = 280, legendTimer = 0;
+
+// ── Noise ──────────────────────────────────────────────────────────
+function hash(x, y) {
+  const h = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+  return h - Math.floor(h);
+}
+
+function noise(x, y) {
+  const ix = Math.floor(x), iy = Math.floor(y);
+  const fx = x - ix, fy = y - iy;
+  const ux = fx * fx * (3 - 2 * fx);
+  const uy = fy * fy * (3 - 2 * fy);
+  const a = hash(ix, iy), b = hash(ix + 1, iy);
+  const c = hash(ix, iy + 1), d = hash(ix + 1, iy + 1);
+  return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
+}
+
+function fbm(x, y) {
+  return noise(x, y) * 0.55 + noise(x * 2.03, y * 2.03) * 0.30 + noise(x * 4.07, y * 4.07) * 0.15;
+}
+
+// ── Planets — period (days), distance (AU), radius (km) ─────────────
+const PLANETS = [
+  { name: 'Mercury', period:    87.97, au:  0.387, radius:  2439 },
+  { name: 'Venus',   period:   224.70, au:  0.723, radius:  6052 },
+  { name: 'Earth',   period:   365.25, au:  1.000, radius:  6371 },
+  { name: 'Mars',    period:   687.00, au:  1.524, radius:  3390 },
+  { name: 'Jupiter', period:  4332.59, au:  5.203, radius: 69911 },
+  { name: 'Saturn',  period: 10759.22, au:  9.537, radius: 58232 },
+  { name: 'Uranus',  period: 30688.50, au: 19.191, radius: 25362 },
+  { name: 'Neptune', period: 60182.00, au: 30.069, radius: 24622 },
+];
+const N_RINGS = PLANETS.length;
+
+// Sqrt-scaled orbital distances for visual spacing (true scale cramps inner planets)
+const sqrtAUs  = PLANETS.map(p => Math.sqrt(p.au));
+const sqrtMin  = sqrtAUs[0], sqrtMax = sqrtAUs[N_RINGS - 1];
+const orbNorms = sqrtAUs.map(s => (s - sqrtMin) / (sqrtMax - sqrtMin));
+const BASE_R_MIN = 0.06;
+const BASE_R_MAX = 0.82;
+
+// Proportional dot sizes — sqrt-scaled so Jupiter doesn't dwarf everything
+const sqrtRadii = PLANETS.map(p => Math.sqrt(p.radius));
+const rMin = sqrtRadii[0], rMax = sqrtRadii[N_RINGS - 1];  // Mercury..Neptune
+const dotNorms  = sqrtRadii.map(r => (r - rMin) / (rMax - rMin));
+
+// Angular speed: normalize so Mercury completes a full orbit in ~3 seconds
+const orbSpeeds = PLANETS.map(p => (2 * Math.PI) / (p.period / PLANETS[0].period * 3));
+// Accumulated angles (so speed changes don't jump positions)
+const orbAngles = PLANETS.map(() => Math.random() * Math.PI * 2);
+
+// ── Ring pulse (sound threshold → flash random ring) ──────────────
+const RING_THRESHOLDS = [0.04, 0.08, 0.14, 0.22, 0.35];
+let ringWasHigh = new Array(RING_THRESHOLDS.length).fill(false);
+const ringPulses = new Array(N_RINGS).fill(0);  // per-ring glow, decays
+
+function pulseRandomRing() {
+  const ri = Math.floor(Math.random() * N_RINGS);
+  ringPulses[ri] = Math.min(1.0, ringPulses[ri] + 0.8);
+}
+
+// ── Trigger ────────────────────────────────────────────────────────
+let warpPulse = 0;   // extra deformation on trigger, decays
+
+function triggerRings() {
+  warpPulse = Math.min(1.0, warpPulse + 0.7);
+}
+
+// ── Isometric projection ──────────────────────────────────────────
+const ISO_PITCH = Math.atan(1 / Math.sqrt(2));
+const SEGS = 90;  // segments per orbit ring
+
+function rotateY(v, a) {
+  const c = Math.cos(a), s = Math.sin(a);
+  return [v[0] * c + v[2] * s, v[1], -v[0] * s + v[2] * c];
+}
+function rotateX(v, a) {
+  const c = Math.cos(a), s = Math.sin(a);
+  return [v[0], v[1] * c - v[2] * s, v[1] * s + v[2] * c];
+}
+function project(v, sc, ox, oy) {
+  return [v[0] * sc + ox, -v[1] * sc + oy];
+}
+
+// ── Glow passes ────────────────────────────────────────────────────
+const PASSES = [
+  { blur: 14, alpha: 0.22, width: 3.0 },
+  { blur: 4,  alpha: 0.50, width: 1.5 },
+  { blur: 0,  alpha: 0.90, width: 0.8 },
+];
+
+let yRot = 0;  // slow scene Y rotation
+
+// ── Draw ───────────────────────────────────────────────────────────
+function drawFrame(now, dt) {
+  ctx.clearRect(0, 0, W, H);
+
+  const sc   = Math.min(W, H) * 0.48;
+  const ox   = W / 2, oy = H / 2;
+  const pulse = Math.min(1.0, warpPulse + ampLevel * 4.0);
+  const dtSec = dt / 1000;
+
+  // Slow scene rotation
+  yRot += dtSec * 0.15;
+
+  // Accumulate orbital angles with pulse-based speed boost
+  const speedMult = 1 + pulse * 4.0;
+  const rings = [];
+  for (let ri = 0; ri < N_RINGS; ri++) {
+    orbAngles[ri] += orbSpeeds[ri] * dtSec * speedMult;
+    const norm = orbNorms[ri];
+    const r = BASE_R_MIN + norm * (BASE_R_MAX - BASE_R_MIN);
+    rings.push({ r, norm, angle: orbAngles[ri], dotNorm: dotNorms[ri] });
+  }
+
+  // Project orbit ring points (circles on XZ plane, y=0)
+  const ringPts = rings.map(ring => {
+    const pts = [];
+    for (let i = 0; i <= SEGS; i++) {
+      const th = (i / SEGS) * Math.PI * 2;
+      const p3 = [ring.r * Math.cos(th), 0, ring.r * Math.sin(th)];
+      const pr = rotateX(rotateY(p3, yRot), ISO_PITCH);
+      pts.push(project(pr, sc, ox, oy));
+    }
+    return pts;
+  });
+
+  // Project planet dot positions
+  const dotPts = rings.map(ring => {
+    const p3 = [ring.r * Math.cos(ring.angle), 0, ring.r * Math.sin(ring.angle)];
+    const pr = rotateX(rotateY(p3, yRot), ISO_PITCH);
+    return project(pr, sc, ox, oy);
+  });
+
+  // Project cross axes (3D cross on XZ plane)
+  const crossR = BASE_R_MIN * 0.5;
+  const crossEnds = [
+    [crossR, 0, 0], [-crossR, 0, 0],
+    [0, 0, crossR], [0, 0, -crossR],
+  ].map(p => {
+    const pr = rotateX(rotateY(p, yRot), ISO_PITCH);
+    return project(pr, sc, ox, oy);
+  });
+
+  // ── Render with 3-pass glow ──────────────────────────────────────
+  for (const pass of PASSES) {
+    ctx.save();
+    ctx.filter = pass.blur ? `blur(${pass.blur}px)` : 'none';
+
+    // Cross at center
+    ctx.strokeStyle = lineColor;
+    ctx.globalAlpha = (0.5 + pulse * 0.25) * pass.alpha / 0.9;
+    ctx.lineWidth   = 1.2 * pass.width;
+    ctx.beginPath();
+    ctx.moveTo(crossEnds[0][0], crossEnds[0][1]);
+    ctx.lineTo(crossEnds[1][0], crossEnds[1][1]);
+    ctx.moveTo(crossEnds[2][0], crossEnds[2][1]);
+    ctx.lineTo(crossEnds[3][0], crossEnds[3][1]);
+    ctx.stroke();
+
+    // Dashed orbit rings
+    ctx.strokeStyle = lineColor;
+    ctx.lineWidth   = 1 * pass.width;
+    ctx.lineCap     = 'round';
+    ctx.setLineDash([4, 6]);
+    ctx.lineDashOffset = -now * 0.012;
+
+    for (let ri = 0; ri < rings.length; ri++) {
+      const rp = ringPulses[ri];
+      ctx.globalAlpha = Math.min(1, pass.alpha * (0.55 + rings[ri].norm * 0.45) + ampLevel * 0.08 + rp * 0.4);
+      ctx.lineWidth   = (1 + rp * 2.5) * pass.width;
+      ctx.beginPath();
+      const pts = ringPts[ri];
+      ctx.moveTo(pts[0][0], pts[0][1]);
+      for (let i = 1; i <= SEGS; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+      ctx.stroke();
+    }
+
+    // Planet dots
+    ctx.fillStyle = lineColor;
+    for (let ri = 0; ri < rings.length; ri++) {
+      const rp = ringPulses[ri];
+      const dotR = (1.2 + rings[ri].dotNorm * 3.0 + rp * 2.0) * pass.width;
+      ctx.globalAlpha = Math.min(1, pass.alpha * (0.7 + rings[ri].norm * 0.3) + ampLevel * 0.12 + rp * 0.3);
+      ctx.beginPath();
+      ctx.arc(dotPts[ri][0], dotPts[ri][1], dotR, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.restore();
+  }
+
+  // ── Planet speed labels (4 left, 4 right) ───────────────────────
+  ctx.setLineDash([]);
+  ctx.font = "14px 'Share Tech Mono', monospace";
+  ctx.letterSpacing = '3px';
+  const labelMargin = W * 0.18;
+  const labelSpacing = H * 0.06;
+  const labelTopY = oy - labelSpacing * 1.5;
+
+  for (let ri = 0; ri < N_RINGS; ri++) {
+    const spd = Math.abs(orbSpeeds[ri] * speedMult);
+    const baseVal = spd * 14.3;
+    const jitter = baseVal < 2 ? Math.sin(now * 0.003 + ri * 1.7) * 1.5 + Math.sin(now * 0.0071 + ri * 3.1) * 0.8 : 0;
+    const val = String(Math.min(99, Math.max(0, Math.round(baseVal + jitter)))).padStart(2, '0');
+    const abbr = PLANETS[ri].name.slice(0, 2).toUpperCase();
+    const ly = labelTopY + (ri % 4) * labelSpacing;
+
+    const rp = ringPulses[ri];
+    ctx.globalAlpha = Math.min(1, 0.55 + rings[ri].norm * 0.35 + rp * 0.45);
+    ctx.fillStyle = lineColor;
+    if (ri < 4) {
+      ctx.textAlign = 'left';
+      ctx.fillText(abbr + ' ' + val, labelMargin, ly);
+    } else {
+      ctx.textAlign = 'right';
+      ctx.fillText(abbr + ' ' + val, W - labelMargin, ly);
+    }
+  }
+
+  // Decay
+  warpPulse *= 0.98;
+  for (let ri = 0; ri < N_RINGS; ri++) ringPulses[ri] *= 0.92;
+  if (!micActive) ampLevel *= 0.97;
+
+  // Legend + UI char cycling
+  if (now - legendTimer > cycleMs) {
+    legendTimer = now;
+    legendSpans.forEach(s => s.textContent = rc());
+    opsEl.textContent = rc() + rc() + rc();
+    zkoEl.textContent = rc() + rc() + rc();
+  }
+
+  // Grain
+  const gW = gCvs.width, gH = gCvs.height;
+  const gi = gCtx.createImageData(gW, gH);
+  const gd = gi.data;
+  for (let k = 0; k < gd.length; k += 4) {
+    const v = Math.random() * 255 | 0;
+    gd[k] = gd[k+1] = gd[k+2] = v; gd[k+3] = 18;
+  }
+  gCtx.putImageData(gi, 0, 0);
+}
+
+// ── Legend ──────────────────────────────────────────────────────────
+function buildLegend() {
+  legEl.innerHTML = '';
+  legendSpans = [];
+  for (let i = 0; i < 16; i++) {
+    const s = document.createElement('span');
+    s.textContent = rc(); s.style.color = VGA[i]; s.style.cursor = 'pointer';
+    s.addEventListener('click', () => {
+      if (cHeld) { uiColorIdx = i; applyUiColor(VGA[i]); }
+      else       { colorIdx = i; lineColor = VGA[i]; }
+    });
+    legEl.appendChild(s);
+    legendSpans.push(s);
+  }
+}
+
+function applyUiColor(col) {
+  btn.style.color   = col;
+  opsEl.style.color = col;
+  zkoEl.style.color = col;
+  document.getElementById('ckey').style.color   = col;
+  document.getElementById('tgkeys').style.color = col;
+  document.getElementById('speed').style.color  = col;
+}
+
+// ── Mic ────────────────────────────────────────────────────────────
+function processAudio() {
+  if (!analyser) return;
+  analyser.getByteTimeDomainData(timeDomain);
+  let sq = 0;
+  for (let k = 0; k < timeDomain.length; k++) { const d = timeDomain[k] / 128 - 1; sq += d * d; }
+  const rms = Math.sqrt(sq / timeDomain.length);
+  ampLevel += (rms * 5.0 - ampLevel) * 0.25;
+  if (rms > 0.05 && !ampWasHigh) { triggerRings(); ampWasHigh = true; }
+  if (rms < 0.03) ampWasHigh = false;
+  RING_THRESHOLDS.forEach((t, i) => {
+    if (rms > t && !ringWasHigh[i]) { pulseRandomRing(); ringWasHigh[i] = true; }
+    if (rms < t * 0.6) ringWasHigh[i] = false;
+  });
+}
+
+async function startMic() {
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    audioCtx  = new AudioContext();
+    analyser  = audioCtx.createAnalyser(); analyser.fftSize = 256;
+    audioCtx.createMediaStreamSource(micStream).connect(analyser);
+    timeDomain = new Uint8Array(analyser.fftSize);
+    micActive = true;
+  } catch {}
+}
+
+function stopMic() {
+  micStream?.getTracks().forEach(t => t.stop()); micStream = null;
+  audioCtx?.close(); audioCtx = analyser = timeDomain = null;
+  micActive = false;
+}
+
+btn.addEventListener('click', () => { if (micActive) stopMic(); else startMic(); });
+setInterval(() => { btn.textContent = rb(); }, 140);
+
+// ── postMessage (from index.html parent) ───────────────────────────
+window.addEventListener('message', e => {
+  if (e.data?.type === 'audioData') {
+    const rms = e.data.rms || 0;
+    ampLevel += (rms * 5.0 - ampLevel) * 0.25;
+    if (rms > 0.05 && !ampWasHigh) { triggerRings(); ampWasHigh = true; }
+    if (rms < 0.03) ampWasHigh = false;
+    RING_THRESHOLDS.forEach((t, i) => {
+      if (rms > t && !ringWasHigh[i]) { pulseRandomRing(); ringWasHigh[i] = true; }
+      if (rms < t * 0.6) ringWasHigh[i] = false;
+    });
+  }
+  if (e.data?.type === 'key') {
+    if (e.data.cHeld !== undefined) cHeld = !!e.data.cHeld;
+    handleKey(e.data.key, !!e.data.shiftKey);
+  }
+});
+
+// ── Keyboard ───────────────────────────────────────────────────────
+function handleKey(key, shiftKey) {
+  if      (key === 'ArrowLeft'  && !cHeld) { cycleMs = Math.min(560, cycleMs + 140); }
+  else if (key === 'ArrowRight' && !cHeld) { cycleMs = Math.max(140, cycleMs - 140); }
+  else if (!cHeld && key === 'ArrowUp')   { colorIdx = (colorIdx - 1 + 16) % 16; lineColor = VGA[colorIdx]; }
+  else if (!cHeld && key === 'ArrowDown')  { colorIdx = (colorIdx + 1) % 16; lineColor = VGA[colorIdx]; }
+  else if (cHeld && key === 'ArrowUp')     { uiColorIdx = (uiColorIdx - 1 + 16) % 16; applyUiColor(VGA[uiColorIdx]); }
+  else if (cHeld && key === 'ArrowDown')   { uiColorIdx = (uiColorIdx + 1) % 16; applyUiColor(VGA[uiColorIdx]); }
+  else if (key === 't' || key === 'T')     { triggerRings(); }
+}
+
+window.addEventListener('keydown', e => {
+  if (e.key === 'c' || e.key === 'C') { cHeld = true; return; }
+  handleKey(e.key, e.shiftKey);
+  window.parent?.postMessage({ type: 'childKey', key: e.key, shiftKey: e.shiftKey }, '*');
+});
+window.addEventListener('keyup', e => {
+  if (e.isTrusted) window.parent?.postMessage({ type: 'childKeyup', key: e.key }, '*');
+  if (e.key === 'c' || e.key === 'C') cHeld = false;
+});
+
+canvas.addEventListener('click', triggerRings);
+document.getElementById('tkey').addEventListener('click', triggerRings);
+document.getElementById('slower').addEventListener('click', () => { cycleMs = Math.min(560, cycleMs + 140); });
+document.getElementById('faster').addEventListener('click', () => { cycleMs = Math.max(140, cycleMs - 140); });
+
+// ── Resize + loop ──────────────────────────────────────────────────
+function resize() {
+  W = canvas.width = gCvs.width = window.innerWidth;
+  H = canvas.height = gCvs.height = window.innerHeight;
+}
+
+let lastTime = 0;
+function frame(now) {
+  const dt = now - lastTime; lastTime = now;
+  if (micActive) processAudio();
+  drawFrame(now, dt);
+  requestAnimationFrame(frame);
+}
+
+// ── Startup color randomization ────────────────────────────────────
+(function() {
+  const GOOD = [6,11,13,14,15];
+  colorIdx  = GOOD[Math.floor(Math.random() * GOOD.length)];
+  lineColor = VGA[colorIdx];
+  const _uiPool = GOOD.filter(i => i !== colorIdx);
+  uiColorIdx = _uiPool[Math.floor(Math.random() * _uiPool.length)];
+  const _uc = VGA[uiColorIdx];
+  if (btn)   btn.style.color   = _uc;
+  if (opsEl) opsEl.style.color = _uc;
+  if (zkoEl) zkoEl.style.color = _uc;
+  const _ck = document.getElementById('ckey');
+  const _tk = document.getElementById('tgkeys');
+  const _sp = document.getElementById('speed');
+  if (_ck) _ck.style.color = _uc;
+  if (_tk) _tk.style.color = _uc;
+  if (_sp) _sp.style.color = _uc;
+})();
+
+buildLegend();
+window.addEventListener('resize', resize);
+resize();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Vibe</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #000;
+    height: 100vh;
+    overflow: hidden;
+    font-family: 'Share Tech Mono', monospace;
+  }
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: radial-gradient(ellipse at center, #0a0f00 0%, #000 70%);
+    z-index: 0;
+  }
+  #canvas {
+    position: fixed;
+    inset: 0;
+    z-index: 1;
+    display: block;
+  }
+  .scanline {
+    position: fixed;
+    inset: 0;
+    background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.08) 2px, rgba(0,0,0,0.08) 4px);
+    pointer-events: none;
+    z-index: 2;
+  }
+  .vignette {
+    position: fixed;
+    inset: 0;
+    background: radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.7) 100%);
+    pointer-events: none;
+    z-index: 3;
+  }
+  #btn {
+    all: unset;
+    position: fixed;
+    top: 20px;
+    left: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    color: #39ff14;
+    letter-spacing: 3px;
+    cursor: pointer;
+  }
+  #vgkeys {
+    position: fixed;
+    top: 54px;
+    left: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    letter-spacing: 3px;
+    color: #39ff14;
+    display: flex;
+    gap: 1ch;
+  }
+  #vkey { cursor: pointer; }
+  #legend {
+    position: fixed;
+    top: 20px;
+    right: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    display: grid;
+    grid-template-columns: repeat(8, 1em);
+    gap: 4px 6px;
+    line-height: 1.4;
+    text-align: center;
+  }
+  #zko {
+    position: fixed;
+    bottom: 20px;
+    left: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    letter-spacing: 3px;
+    color: #39ff14;
+    text-decoration: none;
+    cursor: pointer;
+  }
+  #ops {
+    position: fixed;
+    bottom: 20px;
+    right: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    letter-spacing: 3px;
+    color: #39ff14;
+  }
+  #speed {
+    position: fixed;
+    bottom: 40px;
+    right: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    letter-spacing: 3px;
+    color: #39ff14;
+    user-select: none;
+  }
+  #speed span { cursor: pointer; }
+  #ckey {
+    position: fixed;
+    top: 68px;
+    right: 24px;
+    width: 1em;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    line-height: 1.4;
+    color: #39ff14;
+    text-align: center;
+    pointer-events: none;
+  }
+  #patnum {
+    position: fixed;
+    transform: translate(-50%, -50%);
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    letter-spacing: 3px;
+    color: #39ff14;
+    pointer-events: none;
+  }
+  #grain-cv {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 5;
+  }
+</style>
+</head>
+<body>
+<div class="scanline"></div>
+<div class="vignette"></div>
+<button id="btn"></button>
+<div id="vgkeys">
+  <div id="vkey">T</div>
+</div>
+<div id="patnum">00</div>
+<div id="legend"></div>
+<div id="ops"></div>
+<div id="speed"><span id="slower">&lt;</span> <span id="faster">&gt;</span></div>
+<div id="ckey">C</div>
+<a id="zko" href="https://zko.io" target="_blank" rel="noopener"></a>
+<canvas id="canvas"></canvas>
+<canvas id="grain-cv"></canvas>
+<script>
+  const canvas = document.getElementById('canvas');
+  const ctx    = canvas.getContext('2d');
+
+  let W, H;
+  function resize() {
+    W = canvas.width  = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+  }
+  resize();
+  window.addEventListener('resize', () => { resize(); repositionPatnum(); });
+
+  // ── Chladni patterns ─────────────────────────────────────
+  // f(x,y) = a·sin(π·n·x)·sin(π·m·y) + b·sin(π·m·x)·sin(π·n·y)
+  // x,y ∈ [-1, 1]; nodal lines are the zero contour of f
+  // Sound subtly perturbs b → pattern breathes without losing identity
+  const PATTERNS = [
+    [5, 7,  1,  0.5],  //  0 — organic flowing ovals (5:7 Fibonacci-adj, asymmetric)
+    [1, 3,  1,  1],   //  1 — diamond / square frame
+    [2, 3,  1,  1],   //  2 — cross + inner grid
+    [1, 4,  1,  1],   //  3 — X with arcs
+    [4, 9,  1,  0.6],  //  4 — complex interlocking organic loops
+    [3, 4,  1,  1],   //  5 — dense crossing grid
+    [6, 7,  1, -0.5],  //  6 — twisted near-integer organic web
+    [2, 3,  1, -1],   //  7 — asymmetric diagonals
+    [2, 5,  1,  1],   //  8 — complex loops
+    [3, 5,  1,  1],   //  9 — intricate web
+    [1, 5,  1,  1],   // 10 — elongated star arcs
+    [4, 5,  1,  1],   // 11 — five-star dense grid
+    [1, 4,  1, -1],   // 12 — rotated X with arcs
+    [5, 9,  1, -0.6],  // 13 — complex twisted organic loops
+    [6, 11, 1,  0.5],  // 14 — dense organic multi-lobe structure
+    [4, 6,  1,  1],   // 15 — dense hexagonal lattice
+    [1, 6,  1,  1],   // 16 — wave ribbons
+    [5, 6,  1,  1],   // 17 — fine near-square lattice
+    [5, 8,  1,  0.4],  // 18 — golden-ratio-adj flowing organic structure
+    [3, 4,  1, -1],   // 19 — rotated dense grid
+    [2, 5,  1, -1],   // 20 — rotated complex loops
+    [3, 5,  1, -1],   // 21 — rotated intricate web
+    [4, 5,  1, -1],   // 22 — rotated five-star
+    [1, 6,  1, -1],   // 23 — rotated wave ribbons
+    [5, 6,  1, -1],   // 24 — rotated fine lattice
+    [1, 7,  1,  1],   // 25 — sparse elongated arcs
+    [2, 7,  1,  1],   // 26 — seven-mode loops
+    [3, 7,  1,  1],   // 27 — seven-mode web
+    [4, 7,  1,  1],   // 28 — dense seven-mode grid
+    [5, 7,  1,  1],   // 29 — intricate seven-mode
+    [6, 7,  1,  1],   // 30 — near-square seven lattice
+    [7, 10, 1, -0.4],  // 31 — rich organic rotated lattice
+  ];
+
+  const GRID = 200;
+  const field     = new Float32Array((GRID + 1) * (GRID + 1));
+  const prevField = new Float32Array((GRID + 1) * (GRID + 1));
+
+  // Marching squares: bit3=TL, bit2=TR, bit1=BR, bit0=BL
+  // edges: 0=top, 1=right, 2=bottom, 3=left
+  const MS = [
+    [],               // 0
+    [[2, 3]],         // 1  BL
+    [[1, 2]],         // 2  BR
+    [[1, 3]],         // 3  BR+BL
+    [[0, 1]],         // 4  TR
+    [[0, 1], [2, 3]], // 5  TR+BL  saddle
+    [[0, 2]],         // 6  TR+BR
+    [[0, 3]],         // 7  TR+BR+BL
+    [[0, 3]],         // 8  TL
+    [[0, 2]],         // 9  TL+BL
+    [[0, 3], [1, 2]], // 10 TL+BR  saddle
+    [[0, 1]],         // 11 TL+BR+BL
+    [[1, 3]],         // 12 TL+TR
+    [[1, 2]],         // 13 TL+TR+BL
+    [[2, 3]],         // 14 TL+TR+BR
+    [],               // 15
+  ];
+
+  // ── State ────────────────────────────────────────────────
+  let patIdx    = 0;
+  let transAlpha = 1;
+  let inTrans   = false;
+  let extraAmp  = 0;
+  let ampLevel  = 0;
+  let timePh    = 0;
+  let lineColor  = '#39ff14';
+  let colorIdx   = 10;
+  let uiColorIdx = 10;
+
+  // ── Audio ────────────────────────────────────────────────
+  let analyser = null, timeDomain = null, frequencyData = null;
+  let micActive = false, micStream = null, audioCtx = null;
+  let parentAudio = null;
+  // Frequency band bin boundaries (recalculated on mic start)
+  let bassEnd = 14, midEnd = 140, highEnd = 370;
+  // Per-band cooldown timestamps for auto pattern cycling
+  const autoCycle = { bass: 0, mid: 0, high: 0 };
+
+  // ── Grid → screen: square plate centered in viewport ─────
+  function gridToScreen(gx, gy) {
+    const S  = Math.min(W, H) * 0.62;
+    const ox = (W - S) * 0.5;
+    const oy = (H - S) * 0.5;
+    return [ox + gx / GRID * S, oy + gy / GRID * S];
+  }
+
+  function edgePt(i, j, e, vTL, vTR, vBL, vBR, lev) {
+    let t, gx, gy;
+    const safe = (d) => Math.abs(d) < 1e-10 ? 0.5 : t;
+    if      (e === 0) { t = (lev - vTL) / (vTR - vTL); gx = i + t; gy = j;     }
+    else if (e === 1) { t = (lev - vTR) / (vBR - vTR); gx = i + 1; gy = j + t; }
+    else if (e === 2) { t = (lev - vBL) / (vBR - vBL); gx = i + t; gy = j + 1; }
+    else              { t = (lev - vTL) / (vBL - vTL); gx = i;     gy = j + t; }
+    return gridToScreen(gx, gy);
+  }
+
+  // ── Grain ────────────────────────────────────────────────
+  let grainOn  = true;
+  const grainEl = document.getElementById('grain-cv');
+  const grainCx = grainEl.getContext('2d');
+  let grainImg  = null;
+  function drawGrainFrame() {
+    if (!grainOn) return;
+    const gW = Math.ceil(window.innerWidth  / 2);
+    const gH = Math.ceil(window.innerHeight / 2);
+    if (grainEl.width !== gW || grainEl.height !== gH) {
+      grainEl.width  = gW;
+      grainEl.height = gH;
+      grainImg = grainCx.createImageData(gW, gH);
+    }
+    const data = grainImg.data;
+    for (let i = 0; i < data.length; i += 4) {
+      const v = Math.random() * 255 | 0;
+      data[i] = data[i+1] = data[i+2] = v;
+      data[i+3] = Math.random() * 30 | 0;
+    }
+    grainCx.putImageData(grainImg, 0, 0);
+    requestAnimationFrame(drawGrainFrame);
+  }
+  function toggleGrain() {
+    grainOn = !grainOn;
+    if (grainOn) drawGrainFrame();
+  }
+
+  // ── Draw contour helper ──────────────────────────────────
+  function drawContour(buf, alphaScale) {
+    const lev    = 0;
+    const passes = [
+      { blur: 20, alpha: 0.16, lw: 3.0 },
+      { blur: 7,  alpha: 0.48, lw: 1.4 },
+      { blur: 0,  alpha: 0.94, lw: 0.65 },
+    ];
+    for (const { blur, alpha, lw } of passes) {
+      ctx.strokeStyle = lineColor;
+      ctx.shadowColor = lineColor;
+      ctx.shadowBlur  = blur;
+      ctx.lineWidth   = lw;
+      ctx.globalAlpha = alpha * alphaScale;
+      ctx.beginPath();
+      for (let j = 1; j < GRID - 1; j++) {
+        for (let i = 1; i < GRID - 1; i++) {
+          const vTL = buf[ j      * (GRID + 1) + i    ];
+          const vTR = buf[ j      * (GRID + 1) + i + 1];
+          const vBL = buf[(j + 1) * (GRID + 1) + i    ];
+          const vBR = buf[(j + 1) * (GRID + 1) + i + 1];
+          const ci  = (vTL > lev ? 8 : 0) | (vTR > lev ? 4 : 0)
+                    | (vBR > lev ? 2 : 0) | (vBL > lev ? 1 : 0);
+          for (const [e0, e1] of MS[ci]) {
+            const [x0, y0] = edgePt(i, j, e0, vTL, vTR, vBL, vBR, lev);
+            const [x1, y1] = edgePt(i, j, e1, vTL, vTR, vBL, vBR, lev);
+            ctx.moveTo(x0, y0);
+            ctx.lineTo(x1, y1);
+          }
+        }
+      }
+      ctx.stroke();
+    }
+  }
+
+  // ── Animation ────────────────────────────────────────────
+  function frame() {
+    // Audio RMS
+    if (micActive || parentAudio) {
+      let rms;
+      if (micActive) {
+        analyser.getByteTimeDomainData(timeDomain);
+        let sq = 0;
+        for (let k = 0; k < timeDomain.length; k++) {
+          const d = timeDomain[k] / 255 - 0.5;
+          sq += d * d;
+        }
+        rms = Math.sqrt(sq / timeDomain.length);
+      } else { rms = parentAudio.rms; }
+      ampLevel += (rms * 9 - ampLevel) * 0.20;
+    } else {
+      ampLevel *= 0.90;
+    }
+    extraAmp += (ampLevel * 0.8 - extraAmp) * 0.12;
+    timePh   += 0.018;
+
+    // Frequency band auto-cycle — each band triggers cyclePattern() independently
+    // Bass (20–300 Hz) > threshold 130 → cycle every ≥1.2s, resets all bands
+    // Mid (300–3000 Hz) > threshold 110 → cycle every ≥1.8s, resets mid+high
+    // High (3000–8000 Hz) > threshold 90 → cycle every ≥2.5s
+    const _freqBuf = micActive ? (analyser.getByteFrequencyData(frequencyData), frequencyData) : (parentAudio?.freqData || null);
+    if (_freqBuf) {
+      const frequencyData = _freqBuf;
+      let bS = 0, mS = 0, hS = 0;
+      for (let k = 1; k <= bassEnd; k++)              bS += frequencyData[k];
+      for (let k = bassEnd + 1; k <= midEnd; k++)     mS += frequencyData[k];
+      for (let k = midEnd  + 1; k <= highEnd; k++)    hS += frequencyData[k];
+      const bassE = bS / bassEnd;
+      const midE  = mS / (midEnd  - bassEnd);
+      const highE = hS / (highEnd - midEnd);
+      const now   = performance.now();
+      if      (bassE > 185 && now - autoCycle.bass > 500) {
+        cyclePattern(); autoCycle.bass = autoCycle.mid = autoCycle.high = now;
+      } else if (midE  > 165 && now - autoCycle.mid  > 700) {
+        cyclePattern(); autoCycle.mid  = autoCycle.high = now;
+      } else if (highE > 145 && now - autoCycle.high > 900) {
+        cyclePattern(); autoCycle.high = now;
+      }
+    }
+
+    // Sound reaction: perturb b coefficient + spatial phase shift
+    // Both effects scale with extraAmp for clearly visible response
+    const [n, m, a, b] = PATTERNS[patIdx];
+    const bMod   = b + extraAmp * 0.65 * Math.sin(timePh * 3.5);
+    const sPhase = extraAmp * 0.40 * Math.sin(timePh * 1.8);
+
+    // Build Chladni field — x,y ∈ [-1, 1]
+    for (let j = 0; j <= GRID; j++) {
+      for (let i = 0; i <= GRID; i++) {
+        const x = (i / GRID) * 2 - 1;
+        const y = (j / GRID) * 2 - 1;
+        field[j * (GRID + 1) + i] =
+          a    * Math.sin(Math.PI * n * x + sPhase) * Math.sin(Math.PI * m * y) +
+          bMod * Math.sin(Math.PI * m * x) * Math.sin(Math.PI * n * y + sPhase);
+      }
+    }
+
+    ctx.clearRect(0, 0, W, H);
+
+    if (inTrans) {
+      transAlpha = Math.min(1, transAlpha + 0.05);
+      if (transAlpha >= 1) inTrans = false;
+      drawContour(prevField, 1 - transAlpha);
+      drawContour(field,     transAlpha);
+    } else {
+      drawContour(field, 1);
+    }
+
+    ctx.globalAlpha = 1;
+    ctx.shadowBlur  = 0;
+    requestAnimationFrame(frame);
+  }
+
+  frame();
+
+  // ── V key: cycle Chladni pattern ──────────────────────────
+  const patnumEl = document.getElementById('patnum');
+
+  // Orbit the label counter-clockwise around the plate edge, staying upright.
+  // Starts at top (12 o'clock) for pattern 0, steps CCW with each change.
+  function repositionPatnum() {
+    const S  = Math.min(W, H) * 0.62;
+    const hw = S / 2;
+    const a  = -Math.PI / 2 - patIdx * (2 * Math.PI / PATTERNS.length);
+    const ca = Math.abs(Math.cos(a));
+    const sa = Math.abs(Math.sin(a));
+    // distance from center to plate edge at angle a (square boundary)
+    const br = (ca < 1e-10) ? hw / sa : (sa < 1e-10) ? hw / ca : Math.min(hw / ca, hw / sa);
+    patnumEl.style.left = (W / 2 + (br + 20) * Math.cos(a)) + 'px';
+    patnumEl.style.top  = (H / 2 + (br + 20) * Math.sin(a)) + 'px';
+  }
+
+  function cyclePattern() {
+    prevField.set(field);
+    let next;
+    do { next = Math.floor(Math.random() * PATTERNS.length); } while (next === patIdx);
+    patIdx     = next;
+    transAlpha = 0;
+    inTrans    = true;
+    patnumEl.textContent = String(patIdx).padStart(2, '0');
+    repositionPatnum();
+  }
+  repositionPatnum();
+  window.addEventListener('keydown', e => {
+    if (e.key === 't' || e.key === 'T') cyclePattern();
+    if (e.key === 'g' || e.key === 'G') toggleGrain();
+  });
+  document.getElementById('vkey').addEventListener('click', cyclePattern);
+  canvas.addEventListener('click', cyclePattern);
+  drawGrainFrame();
+
+  // ── Mic toggle ────────────────────────────────────────────
+  const btn = document.getElementById('btn');
+  btn.addEventListener('click', async () => {
+    if (micActive) {
+      micActive = false;
+      btn.style.opacity = '0.4';
+      micStream?.getTracks().forEach(t => t.stop());
+      audioCtx?.close();
+      micStream = audioCtx = analyser = timeDomain = frequencyData = null;
+      ampLevel = 0;
+      return;
+    }
+    try {
+      micStream  = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      audioCtx   = new (window.AudioContext || window.webkitAudioContext)();
+      const src  = audioCtx.createMediaStreamSource(micStream);
+      analyser   = audioCtx.createAnalyser();
+      analyser.fftSize               = 2048;
+      analyser.smoothingTimeConstant = 0.5;
+      src.connect(analyser);
+      timeDomain    = new Uint8Array(analyser.fftSize);
+      frequencyData = new Uint8Array(analyser.frequencyBinCount);
+      const binHz = audioCtx.sampleRate / analyser.fftSize;
+      bassEnd = Math.floor(300  / binHz);
+      midEnd  = Math.floor(3000 / binHz);
+      highEnd = Math.floor(8000 / binHz);
+      micActive  = true;
+      btn.style.opacity = '';
+    } catch { /* permission denied */ }
+  });
+
+  // ── C-key modifier ────────────────────────────────────────
+  let cHeld = false;
+  window.addEventListener('keyup',   e => { if (e.isTrusted) window.parent?.postMessage({ type: 'childKeyup', key: e.key }, '*'); if (e.key==='c'||e.key==='C') cHeld=false; });
+
+  // ── VGA 16-color legend ───────────────────────────────────
+  const POOL   = '.,:;+*#@0123456789';
+  const PRIMES = ['2','3','5','7','11','13','17','19','/'];
+  const rc = () => POOL[Math.floor(Math.random() * POOL.length)];
+  const rb = () => String.fromCodePoint(0x2801 + Math.floor(Math.random() * 255));
+  const rp = () => PRIMES[Math.floor(Math.random() * PRIMES.length)];
+  const VGA = [
+    '#000000','#0000AA','#00AA00','#00AAAA',
+    '#AA0000','#AA00AA','#AA5500','#AAAAAA',
+    '#555555','#5555FF','#55FF55','#55FFFF',
+    '#FF5555','#FF55FF','#FFFF55','#FFFFFF',
+  ];
+  const legendEl    = document.getElementById('legend');
+  const legendSpans = VGA.map(col => {
+    const s = document.createElement('span');
+    s.style.color  = col;
+    s.style.cursor = 'pointer';
+    s.textContent  = rc();
+    s.addEventListener('click', () => {
+      if (cHeld) {
+        btn.style.color   = col;
+        opsEl.style.color = col;
+        zkoEl.style.color = col;
+        document.getElementById('ckey').style.color   = col;
+        document.getElementById('vgkeys').style.color = col;
+        document.getElementById('speed').style.color  = col;
+        patnumEl.style.color = col;
+      } else {
+        lineColor = col;
+        colorIdx  = VGA.indexOf(col);
+      }
+    });
+    legendEl.appendChild(s);
+    return s;
+  });
+
+  const zkoEl = document.getElementById('zko');
+  zkoEl.textContent = rc()+rc()+rc()+rc();
+  btn.textContent   = rb();
+  const opsEl = document.getElementById('ops');
+  opsEl.textContent = rp()+rp();
+
+  let cycleMs = 140;
+  function cycleFn() {
+    btn.textContent   = rb();
+    opsEl.textContent = rp()+rp();
+    zkoEl.textContent = rc()+rc()+rc()+rc();
+    legendSpans.forEach(s => s.textContent = rc());
+  }
+  let cycleId = setInterval(cycleFn, cycleMs);
+
+  function updateSpeedUI() {
+    const sl = document.getElementById('slower');
+    const fa = document.getElementById('faster');
+    sl.style.opacity       = cycleMs >= 560 ? '0.4' : '1';
+    sl.style.pointerEvents = cycleMs >= 560 ? 'none' : '';
+    fa.style.opacity       = cycleMs <= 140 ? '0.4' : '1';
+    fa.style.pointerEvents = cycleMs <= 140 ? 'none' : '';
+  }
+  updateSpeedUI();
+
+  document.getElementById('slower').addEventListener('click', () => {
+    cycleMs = Math.min(560, cycleMs + 140);
+    clearInterval(cycleId); cycleId = setInterval(cycleFn, cycleMs); updateSpeedUI();
+  });
+  document.getElementById('faster').addEventListener('click', () => {
+    cycleMs = Math.max(140, cycleMs - 140);
+    clearInterval(cycleId); cycleId = setInterval(cycleFn, cycleMs); updateSpeedUI();
+  });
+
+  window.addEventListener('keydown', e => {
+    if (e.isTrusted) window.parent?.postMessage({ type: 'childKey', key: e.key, shiftKey: !!e.shiftKey }, '*');
+    if (e.key === 'c' || e.key === 'C') { cHeld = true; return; }
+    if      (e.key === 'ArrowLeft'  && !cHeld) {
+      cycleMs = Math.min(560, cycleMs + 140);
+      clearInterval(cycleId); cycleId = setInterval(cycleFn, cycleMs); updateSpeedUI();
+    } else if (e.key === 'ArrowRight' && !cHeld) {
+      cycleMs = Math.max(140, cycleMs - 140);
+      clearInterval(cycleId); cycleId = setInterval(cycleFn, cycleMs); updateSpeedUI();
+    } else if (!cHeld && e.key === 'ArrowUp') {
+      colorIdx = (colorIdx - 1 + VGA.length) % VGA.length;
+      lineColor = VGA[colorIdx];
+    } else if (!cHeld && e.key === 'ArrowDown') {
+      colorIdx = (colorIdx + 1) % VGA.length;
+      lineColor = VGA[colorIdx];
+    } else if (cHeld && e.key === 'ArrowUp') {
+      uiColorIdx = (uiColorIdx - 1 + VGA.length) % VGA.length;
+      btn.style.color   = VGA[uiColorIdx];
+      opsEl.style.color = VGA[uiColorIdx];
+      zkoEl.style.color = VGA[uiColorIdx];
+      document.getElementById('ckey').style.color   = VGA[uiColorIdx];
+      document.getElementById('vgkeys').style.color = VGA[uiColorIdx];
+      document.getElementById('speed').style.color  = VGA[uiColorIdx];
+      patnumEl.style.color = VGA[uiColorIdx];
+    } else if (cHeld && e.key === 'ArrowDown') {
+      uiColorIdx = (uiColorIdx + 1) % VGA.length;
+      btn.style.color   = VGA[uiColorIdx];
+      opsEl.style.color = VGA[uiColorIdx];
+      zkoEl.style.color = VGA[uiColorIdx];
+      document.getElementById('ckey').style.color   = VGA[uiColorIdx];
+      document.getElementById('vgkeys').style.color = VGA[uiColorIdx];
+      document.getElementById('speed').style.color  = VGA[uiColorIdx];
+      patnumEl.style.color = VGA[uiColorIdx];
+    }
+  });
+
+  // ── postMessage bridge (keyboard from parent window) ──────────
+  window.addEventListener('message', e => {
+    if (e.data?.type === 'key') {
+      if (e.data.cHeld !== undefined) cHeld = !!e.data.cHeld;
+      window.dispatchEvent(new KeyboardEvent('keydown', {key:e.data.key, shiftKey:!!e.data.shiftKey, bubbles:true}));
+    }
+    else if (e.data?.type === 'keyup')
+      window.dispatchEvent(new KeyboardEvent('keyup', {key:e.data.key, bubbles:true}));
+    else if (e.data?.type === 'audioData')
+      parentAudio = e.data;
+  });
+
+  // Randomize colors on load
+  (function() {
+    const GOOD = [6,11,13,14,15];
+    colorIdx  = GOOD[Math.floor(Math.random() * GOOD.length)];
+    lineColor = VGA[colorIdx];
+    const _uiPool = GOOD.filter(i => i !== colorIdx);
+    uiColorIdx = _uiPool[Math.floor(Math.random() * _uiPool.length)];
+    const _uc = VGA[uiColorIdx];
+    if (btn)   btn.style.color   = _uc;
+    if (opsEl) opsEl.style.color = _uc;
+    if (zkoEl) zkoEl.style.color = _uc;
+    const _ck = document.getElementById('ckey');
+    const _tk = document.getElementById('vgkeys');
+    const _sp = document.getElementById('speed');
+    const _pn = document.getElementById('patnum');
+    if (_ck) _ck.style.color = _uc;
+    if (_tk) _tk.style.color = _uc;
+    if (_sp) _sp.style.color = _uc;
+    if (_pn) _pn.style.color = _uc;
+  })();
+</script>
+</body>
+</html>

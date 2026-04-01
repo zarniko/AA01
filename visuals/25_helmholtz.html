@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>helmholtz</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; overflow: hidden; }
+    .scanline {
+      position: fixed; inset: 0; pointer-events: none; z-index: 5;
+      background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.06) 2px, rgba(0,0,0,0.06) 4px);
+    }
+    .vignette {
+      position: fixed; inset: 0; pointer-events: none; z-index: 4;
+      background: radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.65) 100%);
+    }
+    canvas { position: fixed; inset: 0; width: 100%; height: 100%; }
+    #grain-cv { z-index: 2; pointer-events: none; }
+    #canvas   { z-index: 1; }
+    #btn {
+      all: unset; position: fixed; top: 20px; left: 24px; z-index: 6;
+      font-family: 'Share Tech Mono', monospace; font-size: 14px;
+      letter-spacing: 3px; cursor: pointer; user-select: none;
+    }
+    #tgkeys {
+      position: fixed; top: 54px; left: 24px; z-index: 6;
+      font-family: 'Share Tech Mono', monospace; font-size: 14px;
+      letter-spacing: 3px; display: flex; gap: 1ch;
+    }
+    #tkey { cursor: pointer; }
+    #legend {
+      position: fixed; top: 20px; right: 24px; z-index: 6;
+      font-family: 'Share Tech Mono', monospace; font-size: 14px;
+      display: grid; grid-template-columns: repeat(8, 1em);
+      gap: 4px 6px; line-height: 1.4; text-align: center;
+    }
+    #ckey {
+      position: fixed; top: 68px; right: 24px; z-index: 6;
+      font-family: 'Share Tech Mono', monospace; font-size: 14px;
+      letter-spacing: 3px; text-align: center;
+      pointer-events: none; user-select: none;
+    }
+    #ops {
+      position: fixed; bottom: 20px; right: 24px; z-index: 6;
+      font-family: 'Share Tech Mono', monospace; font-size: 14px;
+      letter-spacing: 3px; pointer-events: none;
+    }
+    #speed {
+      position: fixed; bottom: 40px; right: 24px; z-index: 6;
+      font-family: 'Share Tech Mono', monospace; font-size: 14px;
+      letter-spacing: 3px; user-select: none;
+    }
+    #speed span { cursor: pointer; }
+    #zko {
+      position: fixed; bottom: 20px; left: 24px; z-index: 6;
+      font-family: 'Share Tech Mono', monospace; font-size: 14px;
+      letter-spacing: 3px; text-decoration: none; cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div class="scanline"></div>
+  <div class="vignette"></div>
+  <button id="btn"></button>
+  <div id="tgkeys"><div id="tkey">T</div></div>
+  <canvas id="grain-cv"></canvas>
+  <div id="legend"></div>
+  <div id="ops"></div>
+  <div id="speed"><span id="slower">&lt;</span> <span id="faster">&gt;</span></div>
+  <div id="ckey">C</div>
+  <a id="zko" href="https://zko.io" target="_blank" rel="noopener"></a>
+  <canvas id="canvas"></canvas>
+
+  <script>
+    // ── Canvas setup ────────────────────────────────────────────────
+    const canvas = document.getElementById('canvas');
+    const ctx    = canvas.getContext('2d');
+    const gCvs   = document.getElementById('grain-cv');
+    const gCtx   = gCvs.getContext('2d');
+    let W = 0, H = 0;
+
+    // ── VGA palette + helpers ───────────────────────────────────────
+    const VGA  = ['#000000','#0000AA','#00AA00','#00AAAA','#AA0000','#AA00AA','#AA5500','#AAAAAA',
+                  '#555555','#5555FF','#55FF55','#55FFFF','#FF5555','#FF55FF','#FFFF55','#FFFFFF'];
+    const POOL = '.,:;+*#@0123456789';
+    const rc   = () => POOL[Math.floor(Math.random() * POOL.length)];
+    const rb   = () => String.fromCodePoint(0x2801 + Math.floor(Math.random() * 255));
+
+    let lineColor  = '#55FFFF';
+    let colorIdx   = 11;
+    let uiColorIdx = 10;
+    let cycleMs    = 280;
+    let cHeld      = false;
+    let ampLevel   = 0;
+    let ampWasHigh = false;
+    let micActive  = false, micStream = null, audioCtx = null, analyser = null, timeDomain = null;
+
+    const btn     = document.getElementById('btn');
+    const opsEl   = document.getElementById('ops');
+    const zkoEl   = document.getElementById('zko');
+    const legEl   = document.getElementById('legend');
+    function hexRGB(col) {
+      return [parseInt(col.slice(1,3),16), parseInt(col.slice(3,5),16), parseInt(col.slice(5,7),16)];
+    }
+
+    function applyUiColor(col) {
+      [btn, opsEl, zkoEl].forEach(el => { if (el) el.style.color = col; });
+      const ck = document.getElementById('ckey');
+      const tk = document.getElementById('tgkeys');
+      const sp = document.getElementById('speed');
+      if (ck) ck.style.color = col;
+      if (tk) tk.style.color = col;
+      if (sp) sp.style.color = col;
+    }
+
+    // ── Helmholtz spectral solver ───────────────────────────────────
+    // Solves ∇²u + k²u = f on [-1,1]² with Dirichlet BCs u=0 on boundary.
+    // Modal expansion: u = Σ_{m,n} c_{mn} φ_m(x) φ_n(y)
+    // where φ_m(x) = sin(mπ(x+1)/2), eigenvalue λ_{mn} = -((mπ/2)² + (nπ/2)²)
+    // Coefficient: c_{mn} = <f, φ_{mn}> / (λ_{mn} + k²)
+
+    const N_MODES = 10;
+    const GRID    = 128;
+
+    // Chebyshev-Lobatto nodes cos(πi/N) — clustered near edges, shown as overlay
+    const CHEB_LEVELS = [4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28]; // 13 even levels, index 3 = N=10 (offset 0)
+    let chebLevel = 0;
+    let nCheb = CHEB_LEVELS[chebLevel];
+    let chebNodes = Array.from({length: nCheb + 1}, (_, i) => Math.cos(Math.PI * i / nCheb));
+    function rebuildCheb() {
+      nCheb = CHEB_LEVELS[chebLevel];
+      chebNodes = Array.from({length: nCheb + 1}, (_, i) => Math.cos(Math.PI * i / nCheb));
+    }
+
+    // Uniform grid on [-1, 1]
+    const gxs = new Float32Array(GRID);
+    const gys = new Float32Array(GRID);
+    for (let i = 0; i < GRID; i++) gxs[i] = -1 + 2 * i / (GRID - 1);
+    for (let j = 0; j < GRID; j++) gys[j] = -1 + 2 * j / (GRID - 1);
+
+    // Basis: φ_m(x) = sin(mπ(x+1)/2)
+    const phiX = [], phiY = [];
+    for (let m = 1; m <= N_MODES; m++) {
+      const row = new Float32Array(GRID);
+      for (let i = 0; i < GRID; i++) row[i] = Math.sin(m * Math.PI * (gxs[i] + 1) / 2);
+      phiX.push(row);
+    }
+    for (let n = 1; n <= N_MODES; n++) {
+      const row = new Float32Array(GRID);
+      for (let j = 0; j < GRID; j++) row[j] = Math.sin(n * Math.PI * (gys[j] + 1) / 2);
+      phiY.push(row);
+    }
+
+    // Eigenvalues λ_{mn} = -((mπ/2)² + (nπ/2)²)
+    const eigenVal = [];
+    for (let m = 1; m <= N_MODES; m++) {
+      const ev = new Float32Array(N_MODES);
+      for (let n = 1; n <= N_MODES; n++)
+        ev[n-1] = -((m * Math.PI / 2) ** 2 + (n * Math.PI / 2) ** 2);
+      eigenVal.push(ev);
+    }
+
+    // Resonance frequencies k_{mn} = sqrt((mπ/2)² + (nπ/2)²), sorted + deduped
+    const _kRaw = [];
+    for (let m = 1; m <= N_MODES; m++)
+      for (let n = 1; n <= N_MODES; n++)
+        _kRaw.push({ k: Math.sqrt((m * Math.PI / 2) ** 2 + (n * Math.PI / 2) ** 2), m, n });
+    _kRaw.sort((a, b) => a.k - b.k);
+    const kRes = _kRaw.filter((r, i) => i === 0 || r.k - _kRaw[i-1].k > 0.05).slice(0, 12);
+
+    // Source: two asymmetric Gaussian bumps
+    const SRCS = [
+      { x:  0.25, y: -0.30, a: 1.0, s2: 0.08 },
+      { x: -0.15, y:  0.35, a: 0.7, s2: 0.05 },
+    ];
+
+    // Precompute source on grid, then compute <f, φ_{mn}>
+    const fGrid = new Float32Array(GRID * GRID);
+    for (let i = 0; i < GRID; i++)
+      for (let j = 0; j < GRID; j++) {
+        let v = 0;
+        for (const s of SRCS)
+          v += s.a * Math.exp(-((gxs[i]-s.x)**2 + (gys[j]-s.y)**2) / (2 * s.s2));
+        fGrid[i * GRID + j] = v;
+      }
+
+    const dA = (2 / (GRID - 1)) ** 2;
+    const fCoeff = [];
+    for (let m = 0; m < N_MODES; m++) {
+      const row = new Float32Array(N_MODES);
+      for (let n = 0; n < N_MODES; n++) {
+        let sum = 0;
+        const pyn = phiY[n];
+        for (let i = 0; i < GRID; i++) {
+          const pxi = phiX[m][i], base = i * GRID;
+          for (let j = 0; j < GRID; j++) sum += fGrid[base + j] * pxi * pyn[j];
+        }
+        row[n] = sum * dA;
+      }
+      fCoeff.push(row);
+    }
+
+    // Working buffers
+    const coeff   = Array.from({length: N_MODES}, () => new Float32Array(N_MODES));
+    const rowSums = Array.from({length: N_MODES}, () => new Float32Array(GRID));
+    const uField  = new Float32Array(GRID * GRID);
+
+    // Offscreen canvas for ImageData
+    const offCvs = document.createElement('canvas');
+    offCvs.width = offCvs.height = GRID;
+    const offCtx  = offCvs.getContext('2d');
+    const imgData = offCtx.createImageData(GRID, GRID);
+
+    // k animation state
+    const DAMP      = 0.22;
+    let kCurr       = kRes[0].k * 0.85;
+    let kTarget     = kCurr;
+    let kResIdx     = 0;
+    let ampPulse    = 0;
+    let autoTimer   = 0;
+    const AUTO_MS   = 4500;
+
+    let gridPulse = 0; // grid brightness pulse on trigger, decays
+
+    function triggerHelmholtz() {
+      kResIdx = (kResIdx + 1) % kRes.length;
+      kTarget = kRes[kResIdx].k * (0.90 + Math.random() * 0.16);
+      ampPulse = Math.min(1.2, ampPulse + 0.8);
+      gridPulse = 1.0;
+    }
+
+    function cycleGrid(dir) {
+      const next = chebLevel + dir;
+      if (next < 0 || next >= CHEB_LEVELS.length) return;
+      chebLevel = next;
+      rebuildCheb();
+      gridPulse = 1.0;
+    }
+
+    // ── Compute field u(x,y) for given k ───────────────────────────
+    function computeField(k) {
+      const k2 = k * k;
+      for (let m = 0; m < N_MODES; m++) {
+        const ev = eigenVal[m], fc = fCoeff[m], co = coeff[m];
+        for (let n = 0; n < N_MODES; n++) {
+          const d = ev[n] + k2;
+          co[n] = fc[n] / (Math.abs(d) < DAMP ? (d >= 0 ? DAMP : -DAMP) : d);
+        }
+      }
+      for (let m = 0; m < N_MODES; m++) {
+        const rs = rowSums[m], co = coeff[m];
+        rs.fill(0);
+        for (let n = 0; n < N_MODES; n++) {
+          const c = co[n]; if (c === 0) continue;
+          const py = phiY[n];
+          for (let j = 0; j < GRID; j++) rs[j] += c * py[j];
+        }
+      }
+      uField.fill(0);
+      for (let m = 0; m < N_MODES; m++) {
+        const rs = rowSums[m], px = phiX[m];
+        for (let i = 0; i < GRID; i++) {
+          const pxi = px[i], base = i * GRID;
+          for (let j = 0; j < GRID; j++) uField[base + j] += pxi * rs[j];
+        }
+      }
+    }
+
+    // ── Write field to ImageData ────────────────────────────────────
+    function writeImageData() {
+      let maxU = 1e-10;
+      for (let k = 0; k < uField.length; k++) {
+        const a = Math.abs(uField[k]); if (a > maxU) maxU = a;
+      }
+      const scale = 1 + ampPulse * 0.5 + ampLevel * 0.3;
+      const [r0, g0, b0] = hexRGB(lineColor);
+      // Complementary color for negative values
+      const r1 = 255 - r0, g1 = 255 - g0, b1 = 255 - b0;
+      const d = imgData.data;
+      for (let i = 0; i < GRID; i++) {
+        for (let j = 0; j < GRID; j++) {
+          const u = Math.max(-1, Math.min(1, uField[i * GRID + j] / maxU * scale));
+          const pidx = ((GRID - 1 - j) * GRID + i) * 4; // flip y: canvas y↓, math y↑
+          if (u > 0) {
+            d[pidx]   = r0 * u | 0;
+            d[pidx+1] = g0 * u | 0;
+            d[pidx+2] = b0 * u | 0;
+          } else {
+            const nu = -u * 0.55;
+            d[pidx]   = r1 * nu | 0;
+            d[pidx+1] = g1 * nu | 0;
+            d[pidx+2] = b1 * nu | 0;
+          }
+          d[pidx+3] = 255;
+        }
+      }
+      offCtx.putImageData(imgData, 0, 0);
+    }
+
+    // ── Draw frame ──────────────────────────────────────────────────
+    let legendSpans = [], legendTimer = 0;
+
+    function drawFrame(now, dt) {
+      // Advance k toward target + small continuous oscillation
+      kCurr    += (kTarget - kCurr) * 0.010;
+      ampPulse *= 0.97;
+      gridPulse *= 0.95;
+      autoTimer += dt;
+      if (autoTimer > AUTO_MS) { autoTimer = 0; triggerHelmholtz(); }
+
+      const kDrift = 0.12 * Math.sin(now * 0.00028);
+      const k = kCurr + kDrift + ampLevel * 0.35;
+
+      computeField(k);
+      writeImageData();
+
+      ctx.clearRect(0, 0, W, H);
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, W, H);
+
+      // 3-pass glow
+      ctx.save(); ctx.globalAlpha = 0.22; ctx.filter = 'blur(14px)';
+      ctx.drawImage(offCvs, 0, 0, W, H); ctx.restore();
+      ctx.save(); ctx.globalAlpha = 0.50; ctx.filter = 'blur(4px)';
+      ctx.drawImage(offCvs, 0, 0, W, H); ctx.restore();
+      ctx.save(); ctx.globalAlpha = 0.90; ctx.filter = 'none';
+      ctx.drawImage(offCvs, 0, 0, W, H); ctx.restore();
+
+      // Chebyshev-Lobatto grid: dashed lines + node dots
+      const cx = W * 0.5, cy = H * 0.5;
+      const sx = W * 0.47, sy = H * 0.47;
+      const uiCol     = VGA[uiColorIdx];
+      const gridAlpha = 0.28 + ampLevel * 0.12 + gridPulse * 0.55;
+
+      // Dashed grid lines (scrolling dash like other visuals)
+      ctx.save();
+      ctx.strokeStyle = uiCol;
+      ctx.shadowBlur  = 6; ctx.shadowColor = uiCol;
+      ctx.globalAlpha = gridAlpha;
+      ctx.lineWidth   = 0.8;
+      ctx.setLineDash([4, 6]);
+      ctx.lineDashOffset = -now * 0.012;
+
+      // Vertical lines at each Chebyshev x-node
+      for (const nx of chebNodes) {
+        const px = cx + nx * sx;
+        ctx.beginPath(); ctx.moveTo(px, cy - sy); ctx.lineTo(px, cy + sy); ctx.stroke();
+      }
+      // Horizontal lines at each Chebyshev y-node
+      for (const ny of chebNodes) {
+        const py = cy - ny * sy;
+        ctx.beginPath(); ctx.moveTo(cx - sx, py); ctx.lineTo(cx + sx, py); ctx.stroke();
+      }
+      ctx.restore();
+
+      // Node dots along axes
+      ctx.save();
+      ctx.shadowBlur = 8; ctx.shadowColor = uiCol;
+      ctx.fillStyle  = uiCol;
+      ctx.globalAlpha = 0.55 + ampLevel * 0.30 + gridPulse * 0.40;
+      for (const nx of chebNodes) {
+        ctx.beginPath(); ctx.arc(cx + nx * sx, cy, 2.5, 0, Math.PI * 2); ctx.fill();
+      }
+      for (const ny of chebNodes) {
+        ctx.beginPath(); ctx.arc(cx, cy - ny * sy, 2.5, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.restore();
+
+      // k value display — above 2nd Chebyshev dot left of center
+      const nearRes = kRes.reduce((b, r) => Math.abs(r.k - k) < Math.abs(b.k - k) ? r : b);
+      const nearDist = Math.abs(nearRes.k - k) / nearRes.k;
+      const modeStr  = nearDist < 0.05 ? ` (${nearRes.m},${nearRes.n})` : '';
+      const kText = 'k ' + k.toFixed(3) + modeStr;
+      const kx = cx + Math.cos(7 * Math.PI / 10) * sx; // fixed position: 2nd dot left of center at N=10
+      ctx.save();
+      ctx.font = "14px 'Share Tech Mono', monospace";
+      ctx.fillStyle   = uiCol;
+      ctx.shadowBlur  = 8; ctx.shadowColor = uiCol;
+      ctx.globalAlpha = 0.75 + ampLevel * 0.20;
+      ctx.textAlign   = 'center';
+      ctx.fillText(kText, kx, cy - 16);
+      ctx.restore();
+
+      // Resonance ID display — above fixed position right of center
+      const ridText = (kResIdx + 1) + '/' + kRes.length;
+      const rx = cx + Math.cos(2 * Math.PI / 10) * sx; // fixed position: 3rd dot right of center at N=10
+      ctx.save();
+      ctx.font = "14px 'Share Tech Mono', monospace";
+      ctx.fillStyle   = uiCol;
+      ctx.shadowBlur  = 8; ctx.shadowColor = uiCol;
+      ctx.globalAlpha = 0.75 + ampLevel * 0.20;
+      ctx.textAlign   = 'center';
+      ctx.fillText(ridText, rx, cy - 16);
+      ctx.restore();
+
+      // Grid density display — below axis at same x position
+      const glvl = chebLevel - 3;
+      const glvlText = (glvl > 0 ? '+' : '') + glvl;
+      ctx.save();
+      ctx.font = "14px 'Share Tech Mono', monospace";
+      ctx.fillStyle   = uiCol;
+      ctx.shadowBlur  = 8; ctx.shadowColor = uiCol;
+      ctx.globalAlpha = 0.75 + ampLevel * 0.20;
+      ctx.textAlign   = 'center';
+      ctx.fillText(glvlText, rx, cy + 24);
+      ctx.restore();
+
+      // Cycle legend + UI chars
+      if (now - legendTimer > cycleMs) {
+        legendTimer = now;
+        legendSpans.forEach(s => s.textContent = rc());
+        opsEl.textContent = rc() + rc() + rc();
+        zkoEl.textContent = rc() + rc() + rc();
+      }
+
+      // Grain (always on)
+      const gW = gCvs.width, gH = gCvs.height;
+      const gi = gCtx.createImageData(gW, gH);
+      const gd = gi.data;
+      for (let k = 0; k < gd.length; k += 4) {
+        const v = Math.random() * 255 | 0;
+        gd[k] = gd[k+1] = gd[k+2] = v; gd[k+3] = 18;
+      }
+      gCtx.putImageData(gi, 0, 0);
+    }
+
+    // ── Legend ──────────────────────────────────────────────────────
+    function buildLegend() {
+      legEl.innerHTML = '';
+      legendSpans = [];
+      for (let i = 0; i < 16; i++) {
+        const s = document.createElement('span');
+        s.textContent = rc(); s.style.color = VGA[i]; s.style.cursor = 'pointer';
+        s.addEventListener('click', () => {
+          if (cHeld) { uiColorIdx = i; applyUiColor(VGA[i]); }
+          else       { colorIdx = i; lineColor = VGA[i]; }
+        });
+        legEl.appendChild(s);
+        legendSpans.push(s);
+      }
+    }
+
+    // ── Mic ─────────────────────────────────────────────────────────
+    function processAudio() {
+      if (!analyser) return;
+      analyser.getByteTimeDomainData(timeDomain);
+      let sq = 0;
+      for (let k = 0; k < timeDomain.length; k++) { const d = timeDomain[k]/128-1; sq += d*d; }
+      const rms = Math.sqrt(sq / timeDomain.length);
+      ampLevel += (rms * 3.0 - ampLevel) * 0.15;
+      if (rms > 0.05 && !ampWasHigh) { triggerHelmholtz(); ampWasHigh = true; }
+      if (rms < 0.03) ampWasHigh = false;
+    }
+
+    async function startMic() {
+      try {
+        micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        audioCtx  = new AudioContext();
+        analyser  = audioCtx.createAnalyser(); analyser.fftSize = 256;
+        audioCtx.createMediaStreamSource(micStream).connect(analyser);
+        timeDomain = new Uint8Array(analyser.fftSize);
+        micActive = true;
+      } catch {}
+    }
+
+    function stopMic() {
+      micStream?.getTracks().forEach(t => t.stop()); micStream = null;
+      audioCtx?.close(); audioCtx = analyser = timeDomain = null;
+      micActive = false;
+    }
+
+    btn.addEventListener('click', () => { if (micActive) stopMic(); else startMic(); });
+    setInterval(() => { btn.textContent = rb(); }, 140);
+
+    // ── postMessage (from index.html parent) ────────────────────────
+    window.addEventListener('message', e => {
+      if (e.data?.type === 'audioData') {
+        const rms = e.data.rms || 0;
+        ampLevel += (rms * 3.0 - ampLevel) * 0.15;
+        if (rms > 0.05 && !ampWasHigh) { triggerHelmholtz(); ampWasHigh = true; }
+        if (rms < 0.03) ampWasHigh = false;
+      }
+      if (e.data?.type === 'key') {
+        if (e.data.cHeld !== undefined) cHeld = !!e.data.cHeld;
+        handleKey(e.data.key, !!e.data.shiftKey);
+      }
+    });
+
+    // ── Keyboard ────────────────────────────────────────────────────
+    function handleKey(key, shiftKey) {
+      if      (key === 'ArrowLeft'  && !cHeld) { cycleGrid(-1); }
+      else if (key === 'ArrowRight' && !cHeld) { cycleGrid(1); }
+      else if (!cHeld && key === 'ArrowUp')   { colorIdx = (colorIdx - 1 + 16) % 16; lineColor = VGA[colorIdx]; }
+      else if (!cHeld && key === 'ArrowDown')  { colorIdx = (colorIdx + 1) % 16; lineColor = VGA[colorIdx]; }
+      else if (cHeld && key === 'ArrowUp')     { uiColorIdx = (uiColorIdx - 1 + 16) % 16; applyUiColor(VGA[uiColorIdx]); }
+      else if (cHeld && key === 'ArrowDown')   { uiColorIdx = (uiColorIdx + 1) % 16; applyUiColor(VGA[uiColorIdx]); }
+      else if (key === 't' || key === 'T')     { triggerHelmholtz(); }
+    }
+
+    window.addEventListener('keydown', e => {
+      if (e.key === 'c' || e.key === 'C') { cHeld = true; return; }
+      handleKey(e.key, e.shiftKey);
+      window.parent?.postMessage({ type: 'childKey', key: e.key, shiftKey: e.shiftKey }, '*');
+    });
+    window.addEventListener('keyup', e => {
+      if (e.isTrusted) window.parent?.postMessage({ type: 'childKeyup', key: e.key }, '*');
+      if (e.key === 'c' || e.key === 'C') cHeld = false;
+    });
+
+    canvas.addEventListener('click', triggerHelmholtz);
+    document.getElementById('tkey').addEventListener('click', triggerHelmholtz);
+    document.getElementById('slower').addEventListener('click', () => { cycleGrid(-1); });
+    document.getElementById('faster').addEventListener('click', () => { cycleGrid(1); });
+
+    // ── Resize + loop ────────────────────────────────────────────────
+    function resize() {
+      W = canvas.width = gCvs.width = window.innerWidth;
+      H = canvas.height = gCvs.height = window.innerHeight;
+    }
+
+    let lastTime = 0;
+    function frame(now) {
+      const dt = now - lastTime; lastTime = now;
+      if (micActive) processAudio();
+      drawFrame(now, dt);
+      requestAnimationFrame(frame);
+    }
+
+    // ── Startup color randomization ──────────────────────────────────
+    (function() {
+      const GOOD = [6,11,13,14,15];
+      colorIdx  = GOOD[Math.floor(Math.random() * GOOD.length)];
+      lineColor = VGA[colorIdx];
+      const _uiPool = GOOD.filter(i => i !== colorIdx);
+      uiColorIdx = _uiPool[Math.floor(Math.random() * _uiPool.length)];
+      const _uc = VGA[uiColorIdx];
+      if (btn)     btn.style.color     = _uc;
+      if (opsEl)   opsEl.style.color   = _uc;
+      if (zkoEl)   zkoEl.style.color   = _uc;
+      const _ck = document.getElementById('ckey');
+      const _tk = document.getElementById('tgkeys');
+      const _sp = document.getElementById('speed');
+      if (_ck) _ck.style.color = _uc;
+      if (_tk) _tk.style.color = _uc;
+      if (_sp) _sp.style.color = _uc;
+    })();
+
+    buildLegend();
+    window.addEventListener('resize', resize);
+    resize();
+    requestAnimationFrame(frame);
+  </script>
+</body>
+</html>

@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Octahedron</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    overflow: hidden;
+    font-family: 'Share Tech Mono', monospace;
+  }
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: radial-gradient(ellipse at center, #0a0f00 0%, #000 70%);
+    z-index: 0;
+  }
+  #canvas {
+    position: relative;
+    z-index: 1;
+    color: #39ff14;
+    font-size: 14px;
+    line-height: 1.2;
+    white-space: pre;
+    text-shadow: 0 0 8px #39ff14, 0 0 20px #39ff1480;
+    letter-spacing: 2px;
+  }
+  .scanline {
+    position: fixed;
+    inset: 0;
+    background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.08) 2px, rgba(0,0,0,0.08) 4px);
+    pointer-events: none;
+    z-index: 2;
+  }
+  .vignette {
+    position: fixed;
+    inset: 0;
+    background: radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.7) 100%);
+    pointer-events: none;
+    z-index: 3;
+  }
+  #btn {
+    all: unset;
+    position: fixed;
+    top: 20px;
+    left: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    color: #39ff14;
+    letter-spacing: 3px;
+    cursor: pointer;
+  }
+  #rgkeys {
+    position: fixed;
+    top: 54px;
+    left: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    letter-spacing: 3px;
+    color: #39ff14;
+    display: flex;
+    gap: 1ch;
+  }
+  #rkey { cursor: pointer; }
+  #grain-cv {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 5;
+  }
+  #legend {
+    position: fixed;
+    top: 20px;
+    right: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    display: grid;
+    grid-template-columns: repeat(8, 1em);
+    gap: 4px 6px;
+    line-height: 1.4;
+    text-align: center;
+  }
+  #zko {
+    position: fixed;
+    bottom: 20px;
+    left: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    letter-spacing: 3px;
+    color: #39ff14;
+    text-decoration: none;
+    cursor: pointer;
+  }
+  #ops {
+    position: fixed;
+    bottom: 20px;
+    right: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    letter-spacing: 3px;
+    color: #39ff14;
+  }
+  #speed {
+    position: fixed;
+    bottom: 40px;
+    right: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    letter-spacing: 3px;
+    color: #39ff14;
+    user-select: none;
+  }
+  #speed span { cursor: pointer; }
+  #ckey {
+    position: fixed;
+    top: 68px;
+    right: 24px;
+    width: 1em;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    line-height: 1.4;
+    color: #39ff14;
+    text-align: center;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div class="scanline"></div>
+<div class="vignette"></div>
+<button id="btn"></button>
+<div id="rgkeys"><div id="rkey">T</div></div>
+<canvas id="grain-cv"></canvas>
+<div id="legend"></div>
+<div id="ops"></div>
+<div id="speed"><span id="slower">&lt;</span> <span id="faster">&gt;</span></div>
+<div id="ckey">C</div>
+<a id="zko" href="https://zko.io" target="_blank" rel="noopener"></a>
+<pre id="canvas"></pre>
+<script>
+  const W = 71, H = 37;
+  let angle = 0;
+  let reverseUntil = 0;
+  let lastFlipTime = 0;
+  let ampLevel = 0;
+
+  // ── audio state ───────────────────────────────────────────
+  let analyser   = null;
+  let timeDomain = null;
+  let micActive  = false;
+  let micStream  = null;
+  let audioCtx   = null;
+  let parentAudio = null;
+
+  // Octahedron vertices (6 poles along each axis)
+  const verts = [
+    [ 1,  0,  0], // 0 right
+    [-1,  0,  0], // 1 left
+    [ 0,  1,  0], // 2 top
+    [ 0, -1,  0], // 3 bottom
+    [ 0,  0,  1], // 4 front
+    [ 0,  0, -1], // 5 back
+  ];
+
+  // 8 triangular faces
+  const faces = [
+    [2, 4, 0], // top-front-right
+    [2, 0, 5], // top-right-back
+    [2, 5, 1], // top-back-left
+    [2, 1, 4], // top-left-front
+    [3, 0, 4], // bottom-right-front
+    [3, 5, 0], // bottom-back-right
+    [3, 1, 5], // bottom-left-back
+    [3, 4, 1], // bottom-front-left
+  ];
+
+  // 12 edges
+  const edges = [
+    [2,0],[2,4],[2,1],[2,5], // top to equator
+    [3,0],[3,4],[3,1],[3,5], // bottom to equator
+    [0,4],[4,1],[1,5],[5,0], // equatorial square
+  ];
+
+  const ISO_PITCH = Math.atan(1 / Math.sqrt(2));
+
+  function rotateY([x,y,z], a) {
+    return [x*Math.cos(a)+z*Math.sin(a), y, -x*Math.sin(a)+z*Math.cos(a)];
+  }
+  function rotateX([x,y,z], a) {
+    return [x, y*Math.cos(a)-z*Math.sin(a), y*Math.sin(a)+z*Math.cos(a)];
+  }
+
+  function project([x,y,z]) {
+    return [x * 16 + W/2, -y * 9 + H/2];
+  }
+
+  function cross3(a, b) {
+    return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+  }
+  function sub3(a,b) { return [a[0]-b[0],a[1]-b[1],a[2]-b[2]]; }
+  function normalize(v) { const l=Math.hypot(...v)||1; return v.map(x=>x/l); }
+  function dot3(a,b) { return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; }
+
+  const light = normalize([0.6, 1.0, 0.4]);
+  const fillChars = ' .,:;+*#@';
+
+  function getChar(s) {
+    const i = Math.max(0, Math.min(fillChars.length-1, Math.floor(s * fillChars.length)));
+    return fillChars[i];
+  }
+
+  function rasterizeTri(charBuf, zBuf, v0, v1, v2, ch) {
+    const minX = Math.max(0,   Math.floor(Math.min(v0[0],v1[0],v2[0])));
+    const maxX = Math.min(W-1, Math.ceil( Math.max(v0[0],v1[0],v2[0])));
+    const minY = Math.max(0,   Math.floor(Math.min(v0[1],v1[1],v2[1])));
+    const maxY = Math.min(H-1, Math.ceil( Math.max(v0[1],v1[1],v2[1])));
+
+    const edge = (ax,ay,bx,by,px,py) => (bx-ax)*(py-ay)-(by-ay)*(px-ax);
+    const area = edge(v0[0],v0[1],v1[0],v1[1],v2[0],v2[1]);
+    if (Math.abs(area) < 0.5) return;
+
+    for (let y=minY; y<=maxY; y++) {
+      for (let x=minX; x<=maxX; x++) {
+        const px=x+0.5, py=y+0.5;
+        let w0=edge(v1[0],v1[1],v2[0],v2[1],px,py);
+        let w1=edge(v2[0],v2[1],v0[0],v0[1],px,py);
+        let w2=edge(v0[0],v0[1],v1[0],v1[1],px,py);
+        if (area < 0) { w0=-w0; w1=-w1; w2=-w2; }
+        if (w0>=0 && w1>=0 && w2>=0) {
+          const wT=w0+w1+w2;
+          const z=(w0*v0[2]+w1*v1[2]+w2*v2[2])/wT;
+          const idx=y*W+x;
+          if (z > zBuf[idx]) {
+            zBuf[idx]=z;
+            charBuf[idx]=ch;
+          }
+        }
+      }
+    }
+  }
+
+  function drawLine(charBuf, zBuf, sx0,sy0,sz0, sx1,sy1,sz1) {
+    const steps = Math.max(Math.abs(Math.round(sx1)-Math.round(sx0)), Math.abs(Math.round(sy1)-Math.round(sy0)));
+    for (let i=0; i<=steps; i++) {
+      const t = steps===0 ? 0 : i/steps;
+      const x=Math.round(sx0+(sx1-sx0)*t);
+      const y=Math.round(sy0+(sy1-sy0)*t);
+      const z=sz0+(sz1-sz0)*t;
+      if (x>=0&&x<W&&y>=0&&y<H) {
+        const idx=y*W+x;
+        if (z >= zBuf[idx]-0.01) {
+          zBuf[idx]=z+0.01;
+          charBuf[idx]='#';
+        }
+      }
+    }
+  }
+
+  function frame(ts) {
+    if (micActive || parentAudio) {
+      let rms;
+      if (micActive) {
+        analyser.getByteTimeDomainData(timeDomain);
+        let sq = 0;
+        for (let i = 0; i < timeDomain.length; i++) {
+          const d = timeDomain[i] / 255 - 0.5;
+          sq += d * d;
+        }
+        rms = Math.sqrt(sq / timeDomain.length);
+      } else { rms = parentAudio.rms; }
+      ampLevel += (rms * 3 - ampLevel) * 0.1;
+      if (rms > 0.04) triggerReverse();
+    } else {
+      ampLevel *= 0.95;
+    }
+    const reversed = ts < reverseUntil;
+    const speed = 0.0075 + ampLevel * 0.025;
+    angle += reversed ? -speed : speed;
+
+    const tv = verts.map(v => rotateX(rotateY(v, angle), ISO_PITCH));
+    const pv = tv.map(v => { const [sx,sy]=project(v); return [sx,sy,v[2]]; });
+
+    const charBuf = new Array(W*H).fill(' ');
+    const zBuf    = new Float32Array(W*H).fill(-Infinity);
+
+    for (const [i0,i1,i2] of faces) {
+      const n = normalize(cross3(sub3(tv[i1],tv[i0]), sub3(tv[i2],tv[i0])));
+      const d = Math.abs(dot3(n, light));
+      const shade = Math.max(0.15, d);
+      const ch = getChar(shade);
+      rasterizeTri(charBuf, zBuf, pv[i0], pv[i1], pv[i2], ch);
+    }
+
+    for (const [a,b] of edges) {
+      drawLine(charBuf, zBuf, ...pv[a], ...pv[b]);
+    }
+
+    let out = '';
+    for (let y=0; y<H; y++) out += charBuf.slice(y*W, y*W+W).join('') + '\n';
+    document.getElementById('canvas').textContent = out;
+
+    requestAnimationFrame(frame);
+  }
+
+  frame();
+
+  // ── R key: trigger reverse spin ───────────────────────────
+  function triggerReverse() {
+    const now = performance.now();
+    if (now - lastFlipTime < 300) return;
+    lastFlipTime = now;
+    const dur = [500, 1000, 1500, 2000][Math.floor(Math.random() * 4)];
+    reverseUntil = now < reverseUntil ? 0 : now + dur;
+  }
+  window.addEventListener('keydown', e => { if (e.key === 't' || e.key === 'T') triggerReverse(); });
+  document.getElementById('rkey').addEventListener('click', triggerReverse);
+  canvas.addEventListener('click', triggerReverse);
+
+  // ── Grain ────────────────────────────────────────────────
+  let grainOn  = true;
+  const grainEl = document.getElementById('grain-cv');
+  const grainCx = grainEl.getContext('2d');
+  let grainImg  = null;
+  function drawGrainFrame() {
+    if (!grainOn) return;
+    const gW = Math.ceil(window.innerWidth  / 2);
+    const gH = Math.ceil(window.innerHeight / 2);
+    if (grainEl.width !== gW || grainEl.height !== gH) {
+      grainEl.width  = gW;
+      grainEl.height = gH;
+      grainImg = grainCx.createImageData(gW, gH);
+    }
+    const data = grainImg.data;
+    for (let i = 0; i < data.length; i += 4) {
+      const v = Math.random() * 255 | 0;
+      data[i] = data[i+1] = data[i+2] = v;
+      data[i+3] = Math.random() * 30 | 0;
+    }
+    grainCx.putImageData(grainImg, 0, 0);
+    requestAnimationFrame(drawGrainFrame);
+  }
+  function toggleGrain() {
+    grainOn = !grainOn;
+    if (grainOn) drawGrainFrame();
+  }
+  window.addEventListener('keydown', e => { if (e.key === 'g' || e.key === 'G') toggleGrain(); });
+  drawGrainFrame();
+
+  // ── mic toggle ───────────────────────────────────────────
+  const btn = document.getElementById('btn');
+  btn.addEventListener('click', async () => {
+    if (micActive) {
+      micActive = false;
+      btn.style.opacity = '0.4';
+      micStream?.getTracks().forEach(t => t.stop());
+      audioCtx?.close();
+      micStream = audioCtx = analyser = timeDomain = null;
+      ampLevel  = 0;
+      return;
+    }
+    try {
+      micStream  = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      audioCtx   = new (window.AudioContext || window.webkitAudioContext)();
+      const src  = audioCtx.createMediaStreamSource(micStream);
+      analyser   = audioCtx.createAnalyser();
+      analyser.fftSize               = 2048;
+      analyser.smoothingTimeConstant = 0.5;
+      src.connect(analyser);
+      timeDomain = new Uint8Array(analyser.fftSize);
+      micActive  = true;
+      btn.style.opacity = '';
+    } catch { /* permission denied */ }
+  });
+
+  // ── C-key modifier ────────────────────────────────────────
+  let cHeld = false;
+  window.addEventListener('keydown', e => { if (e.key === 'c' || e.key === 'C') cHeld = true; });
+  window.addEventListener('keyup',   e => { if (e.isTrusted) window.parent?.postMessage({ type: 'childKeyup', key: e.key }, '*'); if (e.key === 'c' || e.key === 'C') cHeld = false; });
+
+  // ── VGA 16-color legend ───────────────────────────────────
+  const POOL   = '.,:;+*#@0123456789';
+  const PRIMES = ['2','3','5','7','11','13','17','19','/'];
+  const rc  = () => POOL[Math.floor(Math.random() * POOL.length)];
+  const rb = () => String.fromCodePoint(0x2801 + Math.floor(Math.random() * 255));
+  const rp  = () => PRIMES[Math.floor(Math.random() * PRIMES.length)];
+  const VGA  = [
+    '#000000','#0000AA','#00AA00','#00AAAA',
+    '#AA0000','#AA00AA','#AA5500','#AAAAAA',
+    '#555555','#5555FF','#55FF55','#55FFFF',
+    '#FF5555','#FF55FF','#FFFF55','#FFFFFF',
+  ];
+  const canvasEl    = document.getElementById('canvas');
+  const legendEl    = document.getElementById('legend');
+  let colorIdx = 10;
+  let uiColorIdx = 10;
+  const legendSpans = VGA.map(col => {
+    const s = document.createElement('span');
+    s.style.color  = col;
+    s.style.cursor = 'pointer';
+    s.textContent  = rc();
+    s.addEventListener('click', () => {
+      if (cHeld) {
+        btn.style.color  = col;
+        opsEl.style.color = col;
+        zkoEl.style.color = col;
+        document.getElementById('ckey').style.color   = col;
+        document.getElementById('rgkeys').style.color = col;
+        document.getElementById('speed').style.color  = col;
+      } else {
+        canvasEl.style.color      = col;
+        canvasEl.style.textShadow = `0 0 8px ${col}, 0 0 20px ${col}80`;
+      }
+    });
+    legendEl.appendChild(s);
+    return s;
+  });
+  const zkoEl = document.getElementById('zko');
+  zkoEl.textContent = rc()+rc()+rc()+rc();
+  btn.textContent   = rb();
+  const opsEl = document.getElementById('ops');
+  opsEl.textContent = rp()+rp();
+  let cycleMs = 140;
+  function cycleFn() {
+    btn.textContent   = rb();
+    opsEl.textContent = rp()+rp();
+    zkoEl.textContent = rc()+rc()+rc()+rc();
+    legendSpans.forEach(s => s.textContent = rc());
+  }
+  let cycleId = setInterval(cycleFn, cycleMs);
+  function updateSpeedUI() {
+    const sl = document.getElementById('slower');
+    const fa = document.getElementById('faster');
+    sl.style.opacity       = cycleMs >= 560 ? '0.4' : '1';
+    sl.style.pointerEvents = cycleMs >= 560 ? 'none' : '';
+    fa.style.opacity       = cycleMs <= 140 ? '0.4' : '1';
+    fa.style.pointerEvents = cycleMs <= 140 ? 'none' : '';
+  }
+  updateSpeedUI();
+  document.getElementById('slower').addEventListener('click', () => {
+    cycleMs = Math.min(560, cycleMs + 140);
+    clearInterval(cycleId);
+    cycleId = setInterval(cycleFn, cycleMs);
+    updateSpeedUI();
+  });
+  document.getElementById('faster').addEventListener('click', () => {
+    cycleMs = Math.max(140, cycleMs - 140);
+    clearInterval(cycleId);
+    cycleId = setInterval(cycleFn, cycleMs);
+    updateSpeedUI();
+  });
+  window.addEventListener('keydown', e => {
+    if (e.isTrusted) window.parent?.postMessage({ type: 'childKey', key: e.key, shiftKey: !!e.shiftKey }, '*');
+    if (e.key === 'ArrowLeft' && !cHeld) {
+      cycleMs = Math.min(560, cycleMs + 140);
+      clearInterval(cycleId);
+      cycleId = setInterval(cycleFn, cycleMs);
+      updateSpeedUI();
+    } else if (e.key === 'ArrowRight' && !cHeld) {
+      cycleMs = Math.max(140, cycleMs - 140);
+      clearInterval(cycleId);
+      cycleId = setInterval(cycleFn, cycleMs);
+      updateSpeedUI();
+    } else if (!cHeld && e.key === 'ArrowUp') {
+      colorIdx = (colorIdx - 1 + VGA.length) % VGA.length;
+      canvasEl.style.color      = VGA[colorIdx];
+      canvasEl.style.textShadow = `0 0 8px ${VGA[colorIdx]}, 0 0 20px ${VGA[colorIdx]}80`;
+    } else if (!cHeld && e.key === 'ArrowDown') {
+      colorIdx = (colorIdx + 1) % VGA.length;
+      canvasEl.style.color      = VGA[colorIdx];
+      canvasEl.style.textShadow = `0 0 8px ${VGA[colorIdx]}, 0 0 20px ${VGA[colorIdx]}80`;
+    } else if (cHeld && e.key === 'ArrowUp') {
+      uiColorIdx = (uiColorIdx - 1 + VGA.length) % VGA.length;
+      btn.style.color   = VGA[uiColorIdx];
+      opsEl.style.color = VGA[uiColorIdx];
+      zkoEl.style.color = VGA[uiColorIdx];
+      document.getElementById('ckey').style.color   = VGA[uiColorIdx];
+      document.getElementById('rgkeys').style.color = VGA[uiColorIdx];
+      document.getElementById('speed').style.color  = VGA[uiColorIdx];
+    } else if (cHeld && e.key === 'ArrowDown') {
+      uiColorIdx = (uiColorIdx + 1) % VGA.length;
+      btn.style.color   = VGA[uiColorIdx];
+      opsEl.style.color = VGA[uiColorIdx];
+      zkoEl.style.color = VGA[uiColorIdx];
+      document.getElementById('ckey').style.color   = VGA[uiColorIdx];
+      document.getElementById('rgkeys').style.color = VGA[uiColorIdx];
+      document.getElementById('speed').style.color  = VGA[uiColorIdx];
+    }
+  });
+
+  // ── postMessage bridge (keyboard from parent window) ──────────
+  window.addEventListener('message', e => {
+    if (e.data?.type === 'key') {
+      if (e.data.cHeld !== undefined) cHeld = !!e.data.cHeld;
+      window.dispatchEvent(new KeyboardEvent('keydown', {key:e.data.key, shiftKey:!!e.data.shiftKey, bubbles:true}));
+    }
+    else if (e.data?.type === 'keyup')
+      window.dispatchEvent(new KeyboardEvent('keyup', {key:e.data.key, bubbles:true}));
+    else if (e.data?.type === 'audioData')
+      parentAudio = e.data;
+  });
+
+  // Randomize colors on load
+  (function() {
+    const GOOD = [6,11,13,14,15];
+    colorIdx  = GOOD[Math.floor(Math.random() * GOOD.length)];
+    canvasEl.style.color      = VGA[colorIdx];
+    canvasEl.style.textShadow = `0 0 8px ${VGA[colorIdx]}, 0 0 20px ${VGA[colorIdx]}80`;
+    const _uiPool = GOOD.filter(i => i !== colorIdx);
+    uiColorIdx = _uiPool[Math.floor(Math.random() * _uiPool.length)];
+    const _uc = VGA[uiColorIdx];
+    if (btn)   btn.style.color   = _uc;
+    if (opsEl) opsEl.style.color = _uc;
+    if (zkoEl) zkoEl.style.color = _uc;
+    const _ck = document.getElementById('ckey');
+    const _tk = document.getElementById('tgkeys');
+    const _sp = document.getElementById('speed');
+    if (_ck) _ck.style.color = _uc;
+    if (_tk) _tk.style.color = _uc;
+    if (_sp) _sp.style.color = _uc;
+  })();
+</script>
+</body>
+</html>

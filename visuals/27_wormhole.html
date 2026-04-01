@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>wormhole</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; overflow: hidden; }
+    .scanline {
+      position: fixed; inset: 0; pointer-events: none; z-index: 5;
+      background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.06) 2px, rgba(0,0,0,0.06) 4px);
+    }
+    .vignette {
+      position: fixed; inset: 0; pointer-events: none; z-index: 4;
+      background: radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.65) 100%);
+    }
+    canvas { position: fixed; inset: 0; width: 100%; height: 100%; }
+    #grain-cv { z-index: 2; pointer-events: none; }
+    #canvas   { z-index: 1; }
+    #btn {
+      all: unset; position: fixed; top: 20px; left: 24px; z-index: 6;
+      font-family: 'Share Tech Mono', monospace; font-size: 14px;
+      letter-spacing: 3px; cursor: pointer; user-select: none;
+    }
+    #tgkeys {
+      position: fixed; top: 54px; left: 24px; z-index: 6;
+      font-family: 'Share Tech Mono', monospace; font-size: 14px;
+      letter-spacing: 3px; display: flex; gap: 1ch;
+    }
+    #tkey { cursor: pointer; }
+    #legend {
+      position: fixed; top: 20px; right: 24px; z-index: 6;
+      font-family: 'Share Tech Mono', monospace; font-size: 14px;
+      display: grid; grid-template-columns: repeat(8, 1em);
+      gap: 4px 6px; line-height: 1.4; text-align: center;
+    }
+    #ckey {
+      position: fixed; top: 68px; right: 24px; z-index: 6;
+      font-family: 'Share Tech Mono', monospace; font-size: 14px;
+      letter-spacing: 3px; text-align: center;
+      pointer-events: none; user-select: none;
+    }
+    #ops {
+      position: fixed; bottom: 20px; right: 24px; z-index: 6;
+      font-family: 'Share Tech Mono', monospace; font-size: 14px;
+      letter-spacing: 3px; pointer-events: none;
+    }
+    #speed {
+      position: fixed; bottom: 40px; right: 24px; z-index: 6;
+      font-family: 'Share Tech Mono', monospace; font-size: 14px;
+      letter-spacing: 3px; user-select: none;
+    }
+    #speed span { cursor: pointer; }
+    #zko {
+      position: fixed; bottom: 20px; left: 24px; z-index: 6;
+      font-family: 'Share Tech Mono', monospace; font-size: 14px;
+      letter-spacing: 3px; text-decoration: none; cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div class="scanline"></div>
+  <div class="vignette"></div>
+  <button id="btn"></button>
+  <div id="tgkeys"><div id="tkey">T</div></div>
+  <canvas id="grain-cv"></canvas>
+  <div id="legend"></div>
+  <div id="ops"></div>
+  <div id="speed"><span id="slower">&lt;</span> <span id="faster">&gt;</span></div>
+  <div id="ckey">C</div>
+  <a id="zko" href="https://zko.io" target="_blank" rel="noopener"></a>
+  <canvas id="canvas"></canvas>
+<script>
+'use strict';
+
+const VGA = [
+  '#000000','#0000AA','#00AA00','#00AAAA','#AA0000','#AA00AA','#AA5500',
+  '#AAAAAA','#555555','#5555FF','#55FF55','#55FFFF','#FF5555','#FF55FF',
+  '#FFFF55','#FFFFFF'
+];
+const CHARS = '.,:;+*#@0123456789';
+function rc() { return CHARS[Math.random() * CHARS.length | 0]; }
+function rb() { return String.fromCodePoint(0x2801 + Math.floor(Math.random() * 255)); }
+
+const canvas = document.getElementById('canvas'), ctx = canvas.getContext('2d');
+const gCvs = document.getElementById('grain-cv'), gCtx = gCvs.getContext('2d');
+// Offscreen canvas for single-draw + multi-pass composite
+const offCvs = document.createElement('canvas'), offCtx = offCvs.getContext('2d');
+
+const btn   = document.getElementById('btn');
+const opsEl = document.getElementById('ops');
+const zkoEl = document.getElementById('zko');
+const legEl = document.getElementById('legend');
+let legendSpans = [];
+
+let W, H;
+let colorIdx = 10, lineColor = VGA[10];
+let uiColorIdx = 14;
+let cHeld = false;
+let micActive = false, micStream, audioCtx, analyser, timeDomain, freqData;
+let ampLevel = 0;
+// Per-band rising-edge detection for corner triggering
+const BAND_RANGES = [
+  { lo: 0, hi: 6,  thresh: 210, label: 'bass' },     // ~20-300 Hz
+  { lo: 6, hi: 30, thresh: 200, label: 'mid' },       // ~300-3000 Hz
+  { lo: 30, hi: 60, thresh: 185, label: 'high' },     // ~3000-8000 Hz
+];
+const bandWasHigh = [false, false, false];
+let lastCornerTrigger = 0;
+const GLOBAL_COOLDOWN_MS = 6000;
+let cycleMs = 280, legendTimer = 0;
+
+// ── 3D helpers ────────────────────────────────────────────────────
+const RING_SEGS = 90;
+const VIEW_TILT = Math.PI * 0.47;   // tilt nearly face-on, hole barely visible
+
+function rotateY(v, a) {
+  const c = Math.cos(a), s = Math.sin(a);
+  return [v[0] * c + v[2] * s, v[1], -v[0] * s + v[2] * c];
+}
+function rotateX(v, a) {
+  const c = Math.cos(a), s = Math.sin(a);
+  return [v[0], v[1] * c - v[2] * s, v[1] * s + v[2] * c];
+}
+
+// ── Wormhole geometry ─────────────────────────────────────────────
+const THROAT   = 0.08;        // catenoid throat radius
+const Y_EXTENT = 0.55;        // half-height
+const N_RINGS  = 32;          // ring count
+const N_MERID  = 16;          // meridian lines
+
+// Ring y-positions: denser near throat
+function buildRingYs() {
+  const ys = [];
+  for (let i = 0; i < N_RINGS; i++) {
+    const t = (i / (N_RINGS - 1)) * 2 - 1;
+    ys.push(Math.sinh(t * 1.6) / Math.sinh(1.6) * Y_EXTENT);
+  }
+  return ys;
+}
+const RING_YS = buildRingYs();
+
+function catenoidR(y, throat) {
+  return throat * Math.cosh(y / throat);
+}
+
+// ── Corner targets (throat bends toward a corner) ─────────────────
+const CORNERS = [
+  [-1, -1],   // top-left
+  [ 1, -1],   // top-right
+  [ 1,  1],   // bottom-right
+  [-1,  1],   // bottom-left
+];
+let cornerIdx = 0;
+// Smoothly animated bend direction
+let bendX = CORNERS[0][0], bendY = CORNERS[0][1];
+
+// ── Trigger ────────────────────────────────────────────────────────
+let warpPulse = 0;
+let throatPulse = 0;
+
+function triggerWormhole() {
+  warpPulse = Math.min(1.0, warpPulse + 0.7);
+  throatPulse = Math.min(1.0, throatPulse + 0.5);
+  cornerIdx = (cornerIdx + 1) % 4;
+}
+
+// ── Glow passes ────────────────────────────────────────────────────
+const PASSES = [
+  { blur: 14, alpha: 0.22, width: 3.0 },
+  { blur: 4,  alpha: 0.50, width: 1.5 },
+  { blur: 0,  alpha: 0.90, width: 0.8 },
+];
+
+let yRot = 0;
+
+// ── Draw ───────────────────────────────────────────────────────────
+function drawFrame(now, dt) {
+  ctx.clearRect(0, 0, W, H);
+
+  const pulse = Math.min(1.0, warpPulse + ampLevel * 4.0);
+  const dtSec = dt / 1000;
+  const ox = W / 2, oy = H / 2;
+
+  // Square box size (80% of the smaller dimension)
+  const boxSize = Math.min(W, H) * 0.72;
+  const bx = ox - boxSize / 2, by = oy - boxSize / 2;
+
+  // Scale so wormhole fits inside box with margin
+  const sc = boxSize * 0.52;
+
+  // Rotation — sound makes it feel faster
+  yRot += dtSec * (0.1 + pulse * 0.25 + ampLevel * 0.6);
+
+  // Dynamic throat — pinches on trigger
+  const dynThroat = THROAT * (1 - throatPulse * 0.45);
+
+  // Smooth bend toward target corner
+  const tgt = CORNERS[cornerIdx];
+  bendX += (tgt[0] - bendX) * Math.min(1, dtSec * 0.7);
+  bendY += (tgt[1] - bendY) * Math.min(1, dtSec * 0.7);
+
+  // Bend offset: deeper rings shift more toward corner
+  // depth 0 = mouth (y = Y_EXTENT), depth 1 = far end (y = -Y_EXTENT)
+  const BEND_STRENGTH = boxSize * 0.48;
+  function bendOffset(y) {
+    const depth = (Y_EXTENT - y) / (2 * Y_EXTENT);  // 0..1
+    const ease = depth * depth;  // quadratic ease-in
+    return [bendX * ease * BEND_STRENGTH, bendY * ease * BEND_STRENGTH];
+  }
+
+  // Transform: rotateY for spin, rotateX for tilt, then apply bend
+  function proj(p3, yPos) {
+    const r = rotateX(rotateY(p3, yRot), VIEW_TILT);
+    const [bx2, by2] = bendOffset(yPos);
+    return [r[0] * sc + ox + bx2, -r[1] * sc + oy + by2, r[2]];
+  }
+
+  // ── Build ring geometry (full rings) ─────────────────────────────
+  const ringPts = [];
+  for (let ri = 0; ri < N_RINGS; ri++) {
+    const y = RING_YS[ri];
+    const r = catenoidR(y, dynThroat);
+    const pts = [];
+    for (let si = 0; si <= RING_SEGS; si++) {
+      const th = (si / RING_SEGS) * Math.PI * 2;
+      pts.push(proj([r * Math.cos(th), y, r * Math.sin(th)], y));
+    }
+    ringPts.push(pts);
+  }
+
+  // ── Build meridian geometry ──────────────────────────────────────
+  const MERID_SAMP = 80;
+  const meridPts = [];
+  for (let mi = 0; mi < N_MERID; mi++) {
+    const th = (mi / N_MERID) * Math.PI * 2;
+    const line = [];
+    for (let i = 0; i <= MERID_SAMP; i++) {
+      const t = (i / MERID_SAMP) * 2 - 1;
+      const y = Math.sinh(t * 1.6) / Math.sinh(1.6) * Y_EXTENT;
+      const r = catenoidR(y, dynThroat);
+      line.push(proj([r * Math.cos(th), y, r * Math.sin(th)], y));
+    }
+    meridPts.push(line);
+  }
+
+  // ── Draw wireframe once to offscreen canvas, clipped to box ─────
+  offCtx.clearRect(0, 0, W, H);
+  offCtx.save();
+  offCtx.beginPath();
+  offCtx.rect(bx, by, boxSize, boxSize);
+  offCtx.clip();
+  offCtx.strokeStyle = lineColor;
+  offCtx.lineCap = 'round';
+
+  // Rings — front-face only (z <= 0 faces the camera)
+  offCtx.lineWidth = 1.0;
+  offCtx.setLineDash([]);
+  for (let ri = 0; ri < N_RINGS; ri++) {
+    const distNorm = Math.abs(RING_YS[ri]) / Y_EXTENT;
+    const baseAlpha = 0.4 + distNorm * 0.6 + ampLevel * 0.06;
+    const pts = ringPts[ri];
+    offCtx.globalAlpha = baseAlpha;
+    offCtx.beginPath();
+    let drawing = false;
+    for (let si = 0; si <= RING_SEGS; si++) {
+      if (pts[si][2] <= 0) {
+        if (!drawing) { offCtx.moveTo(pts[si][0], pts[si][1]); drawing = true; }
+        else offCtx.lineTo(pts[si][0], pts[si][1]);
+      } else {
+        if (drawing) { offCtx.stroke(); offCtx.beginPath(); drawing = false; }
+      }
+    }
+    if (drawing) offCtx.stroke();
+  }
+
+  // Meridians — front-face only, dashed + scrolling for speed feel
+  offCtx.lineWidth = 0.8;
+  offCtx.setLineDash([6, 4]);
+  offCtx.lineDashOffset = -(now % 10000) * 0.012 * (1 + ampLevel * 4.0 + pulse * 2.0);
+  offCtx.globalAlpha = 0.65 + ampLevel * 0.06;
+  for (let mi = 0; mi < N_MERID; mi++) {
+    const line = meridPts[mi];
+    offCtx.beginPath();
+    let drawing = false;
+    for (let i = 0; i < line.length; i++) {
+      if (line[i][2] <= 0) {
+        if (!drawing) { offCtx.moveTo(line[i][0], line[i][1]); drawing = true; }
+        else offCtx.lineTo(line[i][0], line[i][1]);
+      } else {
+        if (drawing) { offCtx.stroke(); offCtx.beginPath(); drawing = false; }
+      }
+    }
+    if (drawing) offCtx.stroke();
+  }
+  offCtx.restore();
+
+  // ── Composite offscreen with 3-pass glow ──────────────────────────
+  for (const pass of PASSES) {
+    ctx.save();
+    ctx.filter = pass.blur ? `blur(${pass.blur}px)` : 'none';
+    ctx.globalAlpha = pass.alpha;
+    ctx.drawImage(offCvs, 0, 0);
+    ctx.restore();
+  }
+
+  // ── Border rectangle (outside glow passes, no blur) ──────────────
+  ctx.save();
+  ctx.strokeStyle = lineColor;
+  ctx.globalAlpha = 0.7 + pulse * 0.15;
+  ctx.lineWidth = 1.2;
+  ctx.setLineDash([]);
+  ctx.strokeRect(bx, by, boxSize, boxSize);
+  ctx.restore();
+
+  // Decay
+  warpPulse *= 0.98;
+  throatPulse *= 0.96;
+  if (!micActive) ampLevel *= 0.97;
+
+  // Legend + UI char cycling
+  if (now - legendTimer > cycleMs) {
+    legendTimer = now;
+    legendSpans.forEach(s => s.textContent = rc());
+    opsEl.textContent = rc() + rc() + rc();
+    zkoEl.textContent = rc() + rc() + rc();
+  }
+
+  // Grain
+  const gW = gCvs.width, gH = gCvs.height;
+  const gi = gCtx.createImageData(gW, gH);
+  const gd = gi.data;
+  for (let k = 0; k < gd.length; k += 4) {
+    const v = Math.random() * 255 | 0;
+    gd[k] = gd[k+1] = gd[k+2] = v; gd[k+3] = 18;
+  }
+  gCtx.putImageData(gi, 0, 0);
+}
+
+// ── Legend ──────────────────────────────────────────────────────────
+function buildLegend() {
+  legEl.innerHTML = '';
+  legendSpans = [];
+  for (let i = 0; i < 16; i++) {
+    const s = document.createElement('span');
+    s.textContent = rc(); s.style.color = VGA[i]; s.style.cursor = 'pointer';
+    s.addEventListener('click', () => {
+      if (cHeld) { uiColorIdx = i; applyUiColor(VGA[i]); }
+      else       { colorIdx = i; lineColor = VGA[i]; }
+    });
+    legEl.appendChild(s);
+    legendSpans.push(s);
+  }
+}
+
+function applyUiColor(col) {
+  btn.style.color   = col;
+  opsEl.style.color = col;
+  zkoEl.style.color = col;
+  document.getElementById('ckey').style.color   = col;
+  document.getElementById('tgkeys').style.color = col;
+  document.getElementById('speed').style.color  = col;
+}
+
+// ── Mic ────────────────────────────────────────────────────────────
+function processAudio() {
+  if (!analyser) return;
+  // RMS for amplitude level (speed effect)
+  analyser.getByteTimeDomainData(timeDomain);
+  let sq = 0;
+  for (let k = 0; k < timeDomain.length; k++) { const d = timeDomain[k] / 128 - 1; sq += d * d; }
+  const rms = Math.sqrt(sq / timeDomain.length);
+  ampLevel += (rms * 5.0 - ampLevel) * 0.25;
+
+  // Frequency band analysis for corner triggering (single global cooldown)
+  analyser.getByteFrequencyData(freqData);
+  const now = performance.now();
+  const canTrigger = now - lastCornerTrigger > GLOBAL_COOLDOWN_MS;
+  for (let b = 0; b < BAND_RANGES.length; b++) {
+    const band = BAND_RANGES[b];
+    let sum = 0, count = 0;
+    for (let i = band.lo; i < band.hi && i < freqData.length; i++) { sum += freqData[i]; count++; }
+    const energy = count > 0 ? sum / count : 0;
+    if (energy > band.thresh && !bandWasHigh[b] && canTrigger) {
+      triggerWormhole();
+      bandWasHigh[b] = true;
+      lastCornerTrigger = now;
+      break;  // only one trigger per cooldown window
+    }
+    if (energy < band.thresh * 0.6) bandWasHigh[b] = false;
+  }
+}
+
+async function startMic() {
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    audioCtx  = new AudioContext();
+    analyser  = audioCtx.createAnalyser(); analyser.fftSize = 256;
+    audioCtx.createMediaStreamSource(micStream).connect(analyser);
+    timeDomain = new Uint8Array(analyser.fftSize);
+    freqData   = new Uint8Array(analyser.frequencyBinCount);
+    micActive = true;
+  } catch {}
+}
+
+function stopMic() {
+  micStream?.getTracks().forEach(t => t.stop()); micStream = null;
+  audioCtx?.close(); audioCtx = analyser = timeDomain = freqData = null;
+  micActive = false;
+}
+
+btn.addEventListener('click', () => { if (micActive) stopMic(); else startMic(); });
+setInterval(() => { btn.textContent = rb(); }, 140);
+
+// ── postMessage (from index.html parent) ───────────────────────────
+window.addEventListener('message', e => {
+  if (e.data?.type === 'audioData') {
+    const rms = e.data.rms || 0;
+    ampLevel += (rms * 5.0 - ampLevel) * 0.25;
+    // Frequency band corner triggering from parent audio (single global cooldown)
+    const bands = e.data.bands;
+    const now = performance.now();
+    const canTrigger = now - lastCornerTrigger > GLOBAL_COOLDOWN_MS;
+    if (bands) {
+      for (let b = 0; b < BAND_RANGES.length && b < bands.length; b++) {
+        const energy = bands[b];
+        if (energy > BAND_RANGES[b].thresh && !bandWasHigh[b] && canTrigger) {
+          triggerWormhole();
+          bandWasHigh[b] = true;
+          lastCornerTrigger = now;
+          break;
+        }
+        if (energy < BAND_RANGES[b].thresh * 0.6) bandWasHigh[b] = false;
+      }
+    } else {
+      if (rms > 0.05 && !bandWasHigh[0] && canTrigger) { triggerWormhole(); bandWasHigh[0] = true; lastCornerTrigger = now; }
+      if (rms < 0.03) bandWasHigh[0] = false;
+    }
+  }
+  if (e.data?.type === 'key') {
+    if (e.data.cHeld !== undefined) cHeld = !!e.data.cHeld;
+    handleKey(e.data.key, !!e.data.shiftKey);
+  }
+});
+
+// ── Keyboard ───────────────────────────────────────────────────────
+function handleKey(key, shiftKey) {
+  if      (key === 'ArrowLeft'  && !cHeld) { cycleMs = Math.min(560, cycleMs + 140); }
+  else if (key === 'ArrowRight' && !cHeld) { cycleMs = Math.max(140, cycleMs - 140); }
+  else if (!cHeld && key === 'ArrowUp')   { colorIdx = (colorIdx - 1 + 16) % 16; lineColor = VGA[colorIdx]; }
+  else if (!cHeld && key === 'ArrowDown')  { colorIdx = (colorIdx + 1) % 16; lineColor = VGA[colorIdx]; }
+  else if (cHeld && key === 'ArrowUp')     { uiColorIdx = (uiColorIdx - 1 + 16) % 16; applyUiColor(VGA[uiColorIdx]); }
+  else if (cHeld && key === 'ArrowDown')   { uiColorIdx = (uiColorIdx + 1) % 16; applyUiColor(VGA[uiColorIdx]); }
+  else if (key === 't' || key === 'T')     { triggerWormhole(); }
+}
+
+window.addEventListener('keydown', e => {
+  if (e.key === 'c' || e.key === 'C') { cHeld = true; return; }
+  handleKey(e.key, e.shiftKey);
+  window.parent?.postMessage({ type: 'childKey', key: e.key, shiftKey: e.shiftKey }, '*');
+});
+window.addEventListener('keyup', e => {
+  if (e.isTrusted) window.parent?.postMessage({ type: 'childKeyup', key: e.key }, '*');
+  if (e.key === 'c' || e.key === 'C') cHeld = false;
+});
+
+canvas.addEventListener('click', triggerWormhole);
+document.getElementById('tkey').addEventListener('click', triggerWormhole);
+document.getElementById('slower').addEventListener('click', () => { cycleMs = Math.min(560, cycleMs + 140); });
+document.getElementById('faster').addEventListener('click', () => { cycleMs = Math.max(140, cycleMs - 140); });
+
+// ── Resize + loop ──────────────────────────────────────────────────
+function resize() {
+  W = canvas.width = gCvs.width = offCvs.width = window.innerWidth;
+  H = canvas.height = gCvs.height = offCvs.height = window.innerHeight;
+}
+
+let lastTime = 0;
+function frame(now) {
+  const dt = now - lastTime; lastTime = now;
+  if (micActive) processAudio();
+  drawFrame(now, dt);
+  requestAnimationFrame(frame);
+}
+
+// ── Startup color randomization ────────────────────────────────────
+(function() {
+  const GOOD = [6,11,13,14,15];
+  colorIdx  = GOOD[Math.floor(Math.random() * GOOD.length)];
+  lineColor = VGA[colorIdx];
+  const _uiPool = GOOD.filter(i => i !== colorIdx);
+  uiColorIdx = _uiPool[Math.floor(Math.random() * _uiPool.length)];
+  const _uc = VGA[uiColorIdx];
+  if (btn)   btn.style.color   = _uc;
+  if (opsEl) opsEl.style.color = _uc;
+  if (zkoEl) zkoEl.style.color = _uc;
+  const _ck = document.getElementById('ckey');
+  const _tk = document.getElementById('tgkeys');
+  const _sp = document.getElementById('speed');
+  if (_ck) _ck.style.color = _uc;
+  if (_tk) _tk.style.color = _uc;
+  if (_sp) _sp.style.color = _uc;
+})();
+
+buildLegend();
+window.addEventListener('resize', resize);
+resize();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

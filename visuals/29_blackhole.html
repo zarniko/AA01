@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+
+    .scanline {
+      position: fixed; inset: 0; pointer-events: none; z-index: 5;
+      background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.06) 2px, rgba(0,0,0,0.06) 4px);
+    }
+    .vignette {
+      position: fixed; inset: 0; pointer-events: none; z-index: 4;
+      background: radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.65) 100%);
+    }
+    canvas { position: fixed; inset: 0; width: 100%; height: 100%; }
+    #grain-cv { z-index: 2; opacity: 0.04; pointer-events: none; }
+    #canvas   { z-index: 1; }
+
+    #btn {
+      all: unset;
+      position: fixed; top: 20px; left: 24px; z-index: 6;
+      font-family: 'Share Tech Mono', monospace; font-size: 14px;
+      letter-spacing: 3px; color: #39ff14;
+      cursor: pointer; user-select: none;
+    }
+    #tgkeys {
+      position: fixed; top: 54px; left: 24px; z-index: 6;
+      font-family: 'Share Tech Mono', monospace; font-size: 14px;
+      letter-spacing: 3px; color: #39ff14;
+      display: flex; gap: 1ch;
+    }
+    #tkey { cursor: pointer; }
+    #legend {
+      position: fixed; top: 20px; right: 24px; z-index: 6;
+      font-family: 'Share Tech Mono', monospace; font-size: 14px;
+      display: grid; grid-template-columns: repeat(8, 1em);
+      gap: 4px 6px; line-height: 1.4; text-align: center;
+    }
+    #ckey {
+      position: fixed; top: 68px; right: 24px; width: 1em; z-index: 6;
+      font-family: 'Share Tech Mono', monospace; font-size: 14px;
+      letter-spacing: 3px; color: #39ff14; text-align: center;
+      pointer-events: none; user-select: none;
+    }
+    #ops {
+      position: fixed; bottom: 20px; right: 24px; z-index: 6;
+      font-family: 'Share Tech Mono', monospace; font-size: 14px;
+      letter-spacing: 3px; color: #39ff14;
+      pointer-events: none;
+    }
+    #speed {
+      position: fixed; bottom: 40px; right: 24px; z-index: 6;
+      font-family: 'Share Tech Mono', monospace; font-size: 14px;
+      letter-spacing: 3px; color: #39ff14;
+      user-select: none;
+    }
+    #speed span { cursor: pointer; }
+    #zko {
+      position: fixed; bottom: 20px; left: 24px; z-index: 6;
+      font-family: 'Share Tech Mono', monospace; font-size: 14px;
+      letter-spacing: 3px; color: #39ff14;
+      text-decoration: none; cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div class="scanline"></div>
+  <div class="vignette"></div>
+  <button id="btn"></button>
+  <div id="tgkeys"><div id="tkey">T</div></div>
+  <canvas id="grain-cv"></canvas>
+  <div id="legend"></div>
+  <div id="ops"></div>
+  <div id="speed"><span id="slower">&lt;</span> <span id="faster">&gt;</span></div>
+  <div id="ckey">C</div>
+  <a id="zko" href="https://zko.io" target="_blank" rel="noopener"></a>
+  <canvas id="canvas"></canvas>
+
+  <script>
+    const canvas = document.getElementById('canvas');
+    const ctx    = canvas.getContext('2d');
+    const gCvs   = document.getElementById('grain-cv');
+    const gCtx   = gCvs.getContext('2d');
+    let W = 0, H = 0;
+
+    const VGA  = ['#000000','#0000AA','#00AA00','#00AAAA','#AA0000','#AA00AA','#AA5500','#AAAAAA',
+                  '#555555','#5555FF','#55FF55','#55FFFF','#FF5555','#FF55FF','#FFFF55','#FFFFFF'];
+    const POOL = '.,:;+*#@0123456789';
+    const rc   = () => POOL[Math.floor(Math.random() * POOL.length)];
+    const rb   = () => String.fromCodePoint(0x2801 + Math.floor(Math.random() * 255));
+    const PRIMES = ['2','3','5','7','11','13','17','19','/'];
+    const rp   = () => PRIMES[Math.floor(Math.random() * PRIMES.length)];
+
+    function hexToRgb(hex) {
+      const v = parseInt(hex.slice(1), 16);
+      return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
+    }
+
+    let lineColor  = '#39ff14';
+    let colorIdx   = 10;
+    let uiColorIdx = 10;
+    let cycleMs    = 140;
+    let cHeld      = false;
+    let ampLevel   = 0;
+    let ampWasHigh = false;
+    let micActive  = false, micStream = null, audioCtx = null, analyser = null, timeDomain = null;
+    let parentAudio = null;
+
+    const btn   = document.getElementById('btn');
+    const opsEl = document.getElementById('ops');
+    const zkoEl = document.getElementById('zko');
+    const legEl = document.getElementById('legend');
+
+    // ── Black hole settings ──────────────────────────────────────
+    const N          = 6000;     // number of disk particles
+    const DISK_INNER = 1.6;     // inner edge (Schwarzschild radii)
+    const DISK_OUTER = 5.5;     // outer edge
+    const SHADOW_R   = 1.0;     // event horizon shadow radius
+    const INCL       = 1.35;    // viewing inclination (~77°, nearly edge-on)
+
+    let orbitPhase = 0;
+    let pulseGlow  = 0;
+
+    // ── Annotations ──────────────────────────────────────────────
+    // Leader lines pointing to random dots, with a number label
+    const annotations = [];
+    let annotCount = 0;
+    const ANNOT_LIFE = 3000; // ms before fade out
+    const ANNOT_FADE = 800;  // ms to fade
+
+    let _liveFront = [], _liveBehind = [];
+
+    function spawnAnnotation(shadowPx) {
+      if (W === 0 || H === 0) return;
+      const cx = W / 2, cy = H / 2;
+      const front = _liveFront, behind = _liveBehind;
+
+      // Pick a random point near the edge of the shadow circle, left or right
+      const side = Math.random() < 0.5 ? -1 : 1;
+      const baseAngle = side > 0 ? 0 : Math.PI;
+      const angle = baseAngle + (Math.random() - 0.5) * (Math.PI * 0.6);
+      const dotR = shadowPx * (1.15 + Math.random() * 0.4);
+
+      const x0 = cx + Math.cos(angle) * dotR;
+      const y0 = cy + Math.sin(angle) * dotR;
+
+      // Live values from the simulation
+      const _sc = Math.min(W, H) * 0.055;
+      const _r = (dotR / _sc).toFixed(2);
+      const _deg = ((angle * 180 / Math.PI + 360) % 360).toFixed(0);
+      const _phase = (orbitPhase % (Math.PI * 2)).toFixed(3);
+      const _amp = ampLevel.toFixed(3);
+      const _pts = front.length + behind.length;
+      const _spd = (1.2 / Math.pow(dotR / _sc, 0.7)).toFixed(3);
+      const labels = [
+        `${_r}rs`,
+        `${_deg}°`,
+        `ω ${_phase}`,
+        `amp ${_amp}`,
+        `n=${_pts}`,
+        `v ${_spd}c`,
+        `Δt ${cycleMs}`,
+        `${(performance.now() / 1000).toFixed(1)}s`,
+      ];
+      const label = labels[Math.floor(Math.random() * labels.length)];
+
+      // Leader line goes outward from the dot
+      const armLen = 30 + Math.random() * 40;
+      const armAngle = angle + (Math.random() - 0.5) * 0.3;
+      const ex = x0 + Math.cos(armAngle) * armLen;
+      const ey = y0 + Math.sin(armAngle) * armLen;
+      const legDir = side;
+      const legLen = 25 + Math.random() * 35;
+      const lx = ex + legDir * legLen;
+      const ly = ey;
+
+      annotations.push({
+        x0, y0,                   // dot
+        ex, ey,                   // elbow
+        lx, ly,                   // label end
+        legDir,
+        label,
+        born: performance.now(),
+      });
+
+      // Only 1 at a time
+      if (annotations.length > 1) annotations.shift();
+    }
+
+    // ── Disk particles (fixed positions, orbited each frame) ─────
+    let diskPts = [];
+
+    function initDisk() {
+      diskPts = [];
+      for (let i = 0; i < N; i++) {
+        // Bias toward inner disk for density
+        const u = Math.random();
+        const r = DISK_INNER + u * u * (DISK_OUTER - DISK_INNER);
+        const theta = Math.random() * Math.PI * 2;
+        diskPts.push({ r, theta });
+      }
+    }
+    initDisk();
+
+    // ── Trigger ──────────────────────────────────────────────────
+    function triggerBlackhole() {
+      pulseGlow = Math.min(1.0, pulseGlow + 0.8);
+      // Respawn particles from random angles
+      for (let i = 0; i < 400; i++) {
+        const idx = Math.floor(Math.random() * N);
+        diskPts[idx].theta = Math.random() * Math.PI * 2;
+      }
+    }
+
+    // ── Draw ─────────────────────────────────────────────────────
+    function drawScene() {
+      const cx = W / 2, cy = H / 2;
+      const sc = Math.min(W, H) * 0.069;
+      const shadowPx = SHADOW_R * sc;
+      const [cr, cg, cb] = hexToRgb(lineColor);
+
+      ctx.clearRect(0, 0, W, H);
+
+      // Advance orbit (sound speeds it up more)
+      orbitPhase += 0.006 * (140 / cycleMs) * (1 + ampLevel * 5);
+      pulseGlow *= 0.97;
+
+      const cosI = Math.cos(INCL);
+      const sinI = Math.sin(INCL);
+
+      // Collect projected points, split into behind and front
+      const behind = [];
+      const front  = [];
+
+      for (const p of diskPts) {
+        // Kepler orbit: inner particles move faster
+        const theta = p.theta + orbitPhase / Math.pow(p.r, 1.5);
+
+        // 3D position on disk plane (y=0)
+        const x3 = p.r * Math.cos(theta);
+        const z3 = p.r * Math.sin(theta);
+
+        // Rotate by inclination around X axis
+        const yScreen = -z3 * sinI;
+        const depth   =  z3 * cosI;
+
+        // Flat projection
+        let px = cx + x3 * sc;
+        let py = cy - yScreen * sc;
+
+        // Brightness: inner = brighter
+        const rFrac = (p.r - DISK_INNER) / (DISK_OUTER - DISK_INNER);
+        const bright = 1.0 - rFrac * 0.7;
+
+        if (depth > 0) {
+          // BEHIND — reflect above center (gravitational lensing)
+          py = 2 * cy - py;
+          // Compress slightly (lensed image is tighter than front)
+          py = cy + (py - cy) * 0.85;
+
+          // Deflect away from shadow if too close
+          let dx = px - cx, dy = py - cy;
+          let dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist < shadowPx * 1.25) {
+            const pushDist = shadowPx * 1.25;
+            px = cx + (dx / dist) * pushDist;
+            py = cy + (dy / dist) * pushDist;
+          }
+
+          behind.push({ px, py, bright: bright * 0.6 });
+        } else {
+          // FRONT — skip if inside shadow
+          const dx = px - cx, dy = py - cy;
+          if (dx * dx + dy * dy < shadowPx * shadowPx) continue;
+          front.push({ px, py, bright });
+        }
+      }
+
+      // Draw behind points first, then front (painter's order)
+      const ampBoost = ampLevel * 0.6;
+      const baseAlpha = 0.6 + pulseGlow * 0.2 + ampBoost;
+
+      // Behind — lensed arc above shadow
+      for (const pt of behind) {
+        const a = Math.min(1, pt.bright * baseAlpha * 0.9);
+        const sz = 1.0 + pt.bright * 0.8 + ampBoost * 1.5;
+        ctx.fillStyle = `rgba(${cr},${cg},${cb},${a.toFixed(3)})`;
+        ctx.fillRect(pt.px - sz * 0.5, pt.py - sz * 0.5, sz, sz);
+      }
+
+      // Behind — mirrored lensed arc below shadow (secondary image, dimmer)
+      for (const pt of behind) {
+        const mirrorY = 2 * cy - pt.py;
+        const dx = pt.px - cx, dy = mirrorY - cy;
+        if (dx * dx + dy * dy < shadowPx * shadowPx) continue;
+        const a = Math.min(1, pt.bright * baseAlpha * 0.9);
+        const sz = 1.0 + pt.bright * 0.8 + ampBoost * 1.5;
+        ctx.fillStyle = `rgba(${cr},${cg},${cb},${a.toFixed(3)})`;
+        ctx.fillRect(pt.px - sz * 0.5, mirrorY - sz * 0.5, sz, sz);
+      }
+
+      // Front disk
+      for (const pt of front) {
+        const a = Math.min(1, pt.bright * baseAlpha);
+        const sz = 1.2 + pt.bright * 1.0 + ampBoost * 1.5;
+        ctx.fillStyle = `rgba(${cr},${cg},${cb},${a.toFixed(3)})`;
+        ctx.fillRect(pt.px - sz * 0.5, pt.py - sz * 0.5, sz, sz);
+      }
+
+      // ── Event horizon shadow (no ring/line) ────────────────
+      ctx.fillStyle = '#000';
+      ctx.beginPath();
+      ctx.arc(cx, cy, shadowPx, 0, Math.PI * 2);
+      ctx.fill();
+
+      // ── Annotations (leader lines with numbers) ────────────
+      _liveFront = front; _liveBehind = behind;
+      const now = performance.now();
+
+      if (!drawScene._lastSpawn || now - drawScene._lastSpawn > 4000) {
+        spawnAnnotation(shadowPx);
+        drawScene._lastSpawn = now;
+      }
+
+      // Draw + cull
+      for (let i = annotations.length - 1; i >= 0; i--) {
+        const an = annotations[i];
+        const age = now - an.born;
+        if (age > ANNOT_LIFE + ANNOT_FADE) { annotations.splice(i, 1); continue; }
+
+        let alpha = 1;
+        if (age < 200) alpha = age / 200; // fade in
+        else if (age > ANNOT_LIFE) alpha = 1 - (age - ANNOT_LIFE) / ANNOT_FADE; // fade out
+
+        const uiCol = VGA[uiColorIdx];
+        ctx.globalAlpha = alpha;
+
+        // Line glow pass
+        ctx.strokeStyle = uiCol;
+        ctx.shadowColor = uiCol;
+        ctx.shadowBlur = 10;
+        ctx.lineWidth = 1.8;
+        ctx.setLineDash([4, 3]);
+        ctx.lineDashOffset = -now * 0.012;
+        ctx.beginPath();
+        ctx.moveTo(an.x0, an.y0);
+        ctx.lineTo(an.ex, an.ey);
+        ctx.lineTo(an.lx, an.ly);
+        ctx.stroke();
+
+        // Line sharp pass
+        ctx.shadowBlur = 0;
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(an.x0, an.y0);
+        ctx.lineTo(an.ex, an.ey);
+        ctx.lineTo(an.lx, an.ly);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Label with glow
+        ctx.font = '14px "Share Tech Mono", monospace';
+        ctx.fillStyle = uiCol;
+        ctx.shadowColor = uiCol;
+        ctx.shadowBlur = 10;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'bottom';
+        const chars = an.label.split('');
+        let tx = an.lx + an.legDir * 6;
+        for (const ch of chars) {
+          ctx.fillText(ch, tx, an.ly - 4);
+          tx += ctx.measureText(ch).width + 3;
+        }
+        // Sharp pass
+        ctx.shadowBlur = 0;
+        tx = an.lx + an.legDir * 6;
+        for (const ch of chars) {
+          ctx.fillText(ch, tx, an.ly - 4);
+          tx += ctx.measureText(ch).width + 3;
+        }
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // ── Grain ────────────────────────────────────────────────────
+    function drawGrainFrame() {
+      const id = gCtx.createImageData(W, H);
+      const d  = id.data;
+      for (let i = 0; i < d.length; i += 4) {
+        const v = (Math.random() * 255) | 0;
+        d[i] = d[i+1] = d[i+2] = v; d[i+3] = 25;
+      }
+      gCtx.putImageData(id, 0, 0);
+    }
+
+    // ── Resize ───────────────────────────────────────────────────
+    function resize() {
+      W = canvas.width = gCvs.width = canvas.offsetWidth;
+      H = canvas.height = gCvs.height = canvas.offsetHeight;
+    }
+    window.addEventListener('resize', resize);
+
+    // ── Main loop ────────────────────────────────────────────────
+    function frame() {
+      if (micActive || parentAudio) {
+        let rms;
+        if (micActive && analyser) {
+          analyser.getByteTimeDomainData(timeDomain);
+          let sq = 0;
+          for (let i = 0; i < timeDomain.length; i++) {
+            const d = timeDomain[i] / 255 - 0.5; sq += d * d;
+          }
+          rms = Math.sqrt(sq / timeDomain.length);
+        } else { rms = parentAudio.rms; }
+        ampLevel += (rms * 6 - ampLevel) * 0.15;
+        if (rms > 0.05 && !ampWasHigh) { triggerBlackhole(); ampWasHigh = true; }
+        else if (rms < 0.03) ampWasHigh = false;
+      } else {
+        ampLevel *= 0.92;
+      }
+      drawScene();
+      drawGrainFrame();
+      requestAnimationFrame(frame);
+    }
+
+    // ── Legend swatches ──────────────────────────────────────────
+    const legendSpans = VGA.map(col => {
+      const s = document.createElement('span');
+      s.style.color  = col;
+      s.style.cursor = 'pointer';
+      s.textContent  = rc();
+      s.addEventListener('click', () => {
+        if (cHeld) {
+          btn.style.color  = col; opsEl.style.color = col; zkoEl.style.color = col;
+          document.getElementById('ckey').style.color   = col;
+          document.getElementById('tgkeys').style.color = col;
+          document.getElementById('speed').style.color  = col;
+        } else {
+          lineColor = col; colorIdx = VGA.indexOf(col);
+        }
+      });
+      legEl.appendChild(s);
+      return s;
+    });
+
+    // Flicker at cycleMs (like other visuals)
+    let _flickerTimer = null;
+    function startFlicker() {
+      if (_flickerTimer) clearInterval(_flickerTimer);
+      _flickerTimer = setInterval(() => {
+        legendSpans.forEach(s => s.textContent = rc());
+        opsEl.textContent = rp() + rp();
+        zkoEl.textContent = rc() + rc() + rc() + rc();
+      }, cycleMs);
+    }
+    startFlicker();
+    // Braille btn always at 140ms
+    setInterval(() => { btn.textContent = rb(); }, 140);
+
+    // ── Mic toggle ───────────────────────────────────────────────
+    btn.textContent = rb();
+    btn.addEventListener('click', async () => {
+      if (micActive) {
+        micStream?.getTracks().forEach(t => t.stop());
+        audioCtx?.close();
+        micStream = audioCtx = analyser = timeDomain = null;
+        micActive = false; ampLevel = 0;
+        btn.textContent = rb();
+        return;
+      }
+      try {
+        micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        audioCtx  = new (window.AudioContext || window.webkitAudioContext)();
+        const src = audioCtx.createMediaStreamSource(micStream);
+        analyser  = audioCtx.createAnalyser();
+        analyser.fftSize = 2048;
+        analyser.smoothingTimeConstant = 0.5;
+        src.connect(analyser);
+        timeDomain = new Uint8Array(analyser.fftSize);
+        micActive  = true;
+      } catch {}
+    });
+
+    // ── Key handling ─────────────────────────────────────────────
+    window.addEventListener('keydown', e => {
+      if (e.isTrusted) window.parent?.postMessage({ type: 'childKey', key: e.key, shiftKey: !!e.shiftKey }, '*');
+      if (e.key === 'c' || e.key === 'C') { cHeld = true; return; }
+      if (e.key === 't' || e.key === 'T') { triggerBlackhole(); return; }
+      if (e.key === 'ArrowLeft' && !cHeld) {
+        cycleMs = Math.min(560, cycleMs + 140);
+      } else if (e.key === 'ArrowRight' && !cHeld) {
+        cycleMs = Math.max(140, cycleMs - 140);
+      } else if (!cHeld && e.key === 'ArrowUp') {
+        colorIdx = (colorIdx - 1 + VGA.length) % VGA.length; lineColor = VGA[colorIdx];
+      } else if (!cHeld && e.key === 'ArrowDown') {
+        colorIdx = (colorIdx + 1) % VGA.length; lineColor = VGA[colorIdx];
+      } else if (cHeld && e.key === 'ArrowUp') {
+        uiColorIdx = (uiColorIdx - 1 + VGA.length) % VGA.length;
+        btn.style.color = VGA[uiColorIdx]; opsEl.style.color = VGA[uiColorIdx]; zkoEl.style.color = VGA[uiColorIdx];
+        document.getElementById('ckey').style.color   = VGA[uiColorIdx];
+        document.getElementById('tgkeys').style.color = VGA[uiColorIdx];
+        document.getElementById('speed').style.color  = VGA[uiColorIdx];
+      } else if (cHeld && e.key === 'ArrowDown') {
+        uiColorIdx = (uiColorIdx + 1) % VGA.length;
+        btn.style.color = VGA[uiColorIdx]; opsEl.style.color = VGA[uiColorIdx]; zkoEl.style.color = VGA[uiColorIdx];
+        document.getElementById('ckey').style.color   = VGA[uiColorIdx];
+        document.getElementById('tgkeys').style.color = VGA[uiColorIdx];
+        document.getElementById('speed').style.color  = VGA[uiColorIdx];
+      }
+    });
+
+    window.addEventListener('keyup', e => {
+      if (e.isTrusted) window.parent?.postMessage({ type: 'childKeyup', key: e.key }, '*');
+      if (e.key === 'c' || e.key === 'C') cHeld = false;
+    });
+
+    window.addEventListener('message', e => {
+      if (e.data?.type === 'key') {
+        if (e.data.cHeld !== undefined) cHeld = !!e.data.cHeld;
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: e.data.key, shiftKey: !!e.data.shiftKey, bubbles: true }));
+      }
+      else if (e.data?.type === 'keyup')
+        window.dispatchEvent(new KeyboardEvent('keyup', { key: e.data.key, bubbles: true }));
+      else if (e.data?.type === 'audioData')
+        parentAudio = e.data;
+    });
+
+    canvas.addEventListener('click', triggerBlackhole);
+    document.getElementById('tkey').addEventListener('click', triggerBlackhole);
+    document.getElementById('slower').addEventListener('click', () => { cycleMs = Math.min(560, cycleMs + 140); startFlicker(); });
+    document.getElementById('faster').addEventListener('click', () => { cycleMs = Math.max(140, cycleMs - 140); startFlicker(); });
+
+    // Randomize colors on load
+    (function() {
+      const GOOD = [6,11,13,14,15];
+      colorIdx  = GOOD[Math.floor(Math.random() * GOOD.length)];
+      lineColor = VGA[colorIdx];
+      const _uiPool = GOOD.filter(i => i !== colorIdx);
+      uiColorIdx = _uiPool[Math.floor(Math.random() * _uiPool.length)];
+      const _uc = VGA[uiColorIdx];
+      if (btn)   btn.style.color   = _uc;
+      if (opsEl) opsEl.style.color = _uc;
+      if (zkoEl) zkoEl.style.color = _uc;
+      const _ck = document.getElementById('ckey');
+      const _tk = document.getElementById('tgkeys');
+      const _sp = document.getElementById('speed');
+      if (_ck) _ck.style.color = _uc;
+      if (_tk) _tk.style.color = _uc;
+      if (_sp) _sp.style.color = _uc;
+    })();
+
+    resize();
+    frame();
+  </script>
+</body>
+</html>

@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Voronoi</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #000;
+    height: 100vh;
+    overflow: hidden;
+    font-family: 'Share Tech Mono', monospace;
+  }
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: radial-gradient(ellipse at center, #0a0f00 0%, #000 70%);
+    z-index: 0;
+  }
+  #canvas { position: fixed; inset: 0; z-index: 1; display: block; }
+  .scanline {
+    position: fixed; inset: 0;
+    background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.08) 2px, rgba(0,0,0,0.08) 4px);
+    pointer-events: none; z-index: 2;
+  }
+  .vignette {
+    position: fixed; inset: 0;
+    background: radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.7) 100%);
+    pointer-events: none; z-index: 3;
+  }
+  #btn {
+    all: unset; position: fixed; top: 20px; left: 24px; z-index: 4;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px;
+    color: #39ff14; letter-spacing: 3px; cursor: pointer;
+  }
+  #pgkeys {
+    position: fixed; top: 54px; left: 24px; z-index: 4;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px;
+    letter-spacing: 3px; color: #39ff14; display: flex; gap: 1ch;
+  }
+  #pkey { cursor: pointer; }
+  #grain-cv {
+    position: fixed; inset: 0; width: 100%; height: 100%;
+    pointer-events: none; z-index: 5;
+  }
+  #legend {
+    position: fixed; top: 20px; right: 24px; z-index: 4;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px;
+    display: grid; grid-template-columns: repeat(8, 1em);
+    gap: 4px 6px; line-height: 1.4; text-align: center;
+  }
+  #zko {
+    position: fixed; bottom: 20px; left: 24px; z-index: 4;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px;
+    letter-spacing: 3px; color: #39ff14; text-decoration: none; cursor: pointer;
+  }
+  #ops {
+    position: fixed; bottom: 20px; right: 24px; z-index: 4;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px;
+    letter-spacing: 3px; color: #39ff14;
+  }
+  #speed {
+    position: fixed; bottom: 40px; right: 24px; z-index: 4;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px;
+    letter-spacing: 3px; color: #39ff14; user-select: none;
+  }
+  #speed span { cursor: pointer; }
+  #ckey {
+    position: fixed; top: 68px; right: 24px; width: 1em; z-index: 4;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px;
+    line-height: 1.4; color: #39ff14; text-align: center; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div class="scanline"></div>
+<div class="vignette"></div>
+<button id="btn"></button>
+<div id="pgkeys">
+  <div id="pkey">T</div>
+</div>
+<canvas id="grain-cv"></canvas>
+<div id="legend"></div>
+<div id="ops"></div>
+<div id="speed"><span id="slower">&lt;</span> <span id="faster">&gt;</span></div>
+<div id="ckey">C</div>
+<a id="zko" href="https://zko.io" target="_blank" rel="noopener"></a>
+<canvas id="canvas"></canvas>
+<script>
+  const canvas = document.getElementById('canvas');
+  const ctx    = canvas.getContext('2d');
+  let W, H;
+  function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+  resize();
+  window.addEventListener('resize', resize);
+
+  // ── Voronoi seeds ──────────────────────────────────────────
+  const N_SEEDS = 20;
+  const seeds = [];
+  function initSeeds() {
+    seeds.length = 0;
+    for (let i = 0; i < N_SEEDS; i++) {
+      seeds.push({
+        x: Math.random() * W,
+        y: Math.random() * H,
+        vx: (Math.random() - 0.5) * 8,
+        vy: (Math.random() - 0.5) * 8,
+      });
+    }
+  }
+  initSeeds();
+  window.addEventListener('resize', initSeeds);
+
+  // ── Delaunay triangulation (Bowyer-Watson) ─────────────────
+  function circumcenter(ax, ay, bx, by, cx, cy) {
+    const D = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
+    if (Math.abs(D) < 1e-10) return null;
+    const a2 = ax*ax + ay*ay, b2 = bx*bx + by*by, c2 = cx*cx + cy*cy;
+    return {
+      x: (a2 * (by - cy) + b2 * (cy - ay) + c2 * (ay - by)) / D,
+      y: (a2 * (cx - bx) + b2 * (ax - cx) + c2 * (bx - ax)) / D,
+    };
+  }
+
+  function delaunay(pts) {
+    const M = Math.max(W, H) * 10;
+    const allPts = [
+      { x: -M, y: -M }, { x: M * 3, y: -M }, { x: M, y: M * 3 },
+      ...pts,
+    ];
+    let tris = [{ a: 0, b: 1, c: 2 }];
+
+    for (let p = 3; p < allPts.length; p++) {
+      const px = allPts[p].x, py = allPts[p].y;
+      const bad = [];
+      for (let t = 0; t < tris.length; t++) {
+        const { a, b, c } = tris[t];
+        const cc = circumcenter(allPts[a].x, allPts[a].y, allPts[b].x, allPts[b].y, allPts[c].x, allPts[c].y);
+        if (!cc) continue;
+        const r2 = (allPts[a].x - cc.x) ** 2 + (allPts[a].y - cc.y) ** 2;
+        if ((px - cc.x) ** 2 + (py - cc.y) ** 2 < r2) bad.push(t);
+      }
+      // Find boundary edges (edges only in one bad triangle)
+      const edgeCount = new Map();
+      const edgeVerts = new Map();
+      const eKey = (a, b) => a < b ? a + ',' + b : b + ',' + a;
+      for (const t of bad) {
+        const { a, b, c } = tris[t];
+        for (const [ea, eb] of [[a,b],[b,c],[c,a]]) {
+          const k = eKey(ea, eb);
+          edgeCount.set(k, (edgeCount.get(k) || 0) + 1);
+          edgeVerts.set(k, [ea, eb]);
+        }
+      }
+      // Remove bad triangles in reverse index order
+      bad.sort((a, b) => b - a);
+      for (const t of bad) tris.splice(t, 1);
+      // Add new triangles from boundary edges
+      for (const [k, count] of edgeCount) {
+        if (count === 1) {
+          const [ea, eb] = edgeVerts.get(k);
+          tris.push({ a: ea, b: eb, c: p });
+        }
+      }
+    }
+    return { tris, pts: allPts };
+  }
+
+  // ── Voronoi edges from Delaunay ────────────────────────────
+  // Clip a line segment to the viewport with margin
+  function clipLine(x0, y0, x1, y1) {
+    const m = 50;
+    const xmin = -m, ymin = -m, xmax = W + m, ymax = H + m;
+    // Cohen-Sutherland
+    function code(x, y) {
+      let c = 0;
+      if (x < xmin) c |= 1; else if (x > xmax) c |= 2;
+      if (y < ymin) c |= 4; else if (y > ymax) c |= 8;
+      return c;
+    }
+    let c0 = code(x0, y0), c1 = code(x1, y1);
+    for (let i = 0; i < 20; i++) {
+      if (!(c0 | c1)) return [x0, y0, x1, y1];
+      if (c0 & c1) return null;
+      const co = c0 || c1;
+      let x, y;
+      if (co & 8)      { x = x0 + (x1-x0)*(ymax-y0)/(y1-y0); y = ymax; }
+      else if (co & 4) { x = x0 + (x1-x0)*(ymin-y0)/(y1-y0); y = ymin; }
+      else if (co & 2) { y = y0 + (y1-y0)*(xmax-x0)/(x1-x0); x = xmax; }
+      else             { y = y0 + (y1-y0)*(xmin-x0)/(x1-x0); x = xmin; }
+      if (co === c0) { x0 = x; y0 = y; c0 = code(x0, y0); }
+      else           { x1 = x; y1 = y; c1 = code(x1, y1); }
+    }
+    return null;
+  }
+
+  // Track edge birth times: seed-pair key → timestamp
+  const edgeBirth = new Map();
+  const DASH_DUR  = 2000; // ms new edges stay dashed
+  let firstFrame  = true;
+
+  function computeVoronoiEdges(ts) {
+    const { tris, pts } = delaunay(seeds);
+    const lines = [];   // [x0, y0, x1, y1, isNew]
+    const currentKeys = new Set();
+
+    // Build adjacency: for each edge, which triangles share it
+    const edgeToTris = new Map();
+    const eKey = (a, b) => a < b ? a + ',' + b : b + ',' + a;
+    for (let i = 0; i < tris.length; i++) {
+      const { a, b, c } = tris[i];
+      for (const [ea, eb] of [[a,b],[b,c],[c,a]]) {
+        const k = eKey(ea, eb);
+        if (!edgeToTris.has(k)) edgeToTris.set(k, []);
+        edgeToTris.get(k).push(i);
+      }
+    }
+
+    // Circumcenters
+    const centers = tris.map(({ a, b, c }) =>
+      circumcenter(pts[a].x, pts[a].y, pts[b].x, pts[b].y, pts[c].x, pts[c].y)
+    );
+
+    // For each Delaunay edge between two real points, draw Voronoi edge
+    // Seed indices are offset by 3 (super-triangle verts), so real seed key = (ea-3, eb-3)
+    for (const [k, triIdxs] of edgeToTris) {
+      const [ea, eb] = k.split(',').map(Number);
+      if (ea < 3 || eb < 3) continue;
+
+      const seedKey = eKey(ea - 3, eb - 3);
+      currentKeys.add(seedKey);
+      if (!edgeBirth.has(seedKey)) edgeBirth.set(seedKey, firstFrame ? -DASH_DUR : ts);
+      const age = ts - edgeBirth.get(seedKey);
+      // t: 0 = just born (fully dashed), 1 = fully solid
+      const t = Math.min(1, age / DASH_DUR);
+
+      if (triIdxs.length === 2) {
+        const c0 = centers[triIdxs[0]], c1 = centers[triIdxs[1]];
+        if (!c0 || !c1) continue;
+        const cl = clipLine(c0.x, c0.y, c1.x, c1.y);
+        if (cl) lines.push([...cl, t]);
+      } else if (triIdxs.length === 1) {
+        const cc = centers[triIdxs[0]];
+        if (!cc) continue;
+        const mx = (pts[ea].x + pts[eb].x) / 2;
+        const my = (pts[ea].y + pts[eb].y) / 2;
+        const { a, b, c } = tris[triIdxs[0]];
+        const third = [a, b, c].find(v => v !== ea && v !== eb);
+        const ex = pts[eb].x - pts[ea].x, ey = pts[eb].y - pts[ea].y;
+        let nx = -ey, ny = ex;
+        const tmx = pts[third].x - mx, tmy = pts[third].y - my;
+        if (nx * tmx + ny * tmy > 0) { nx = -nx; ny = -ny; }
+        const len = Math.sqrt(nx * nx + ny * ny) || 1;
+        const ext = Math.max(W, H) * 2;
+        const cl = clipLine(cc.x, cc.y, cc.x + (nx / len) * ext, cc.y + (ny / len) * ext);
+        if (cl) lines.push([...cl, t]);
+      }
+    }
+
+    // Prune edges that no longer exist
+    for (const k of edgeBirth.keys()) {
+      if (!currentKeys.has(k)) edgeBirth.delete(k);
+    }
+
+    firstFrame = false;
+    return lines;
+  }
+
+  // ── State ────────────────────────────────────────────────────
+  let speedBump  = 0;
+  let ampLevel   = 0;
+  let lineColor  = '#39ff14';
+  let colorIdx   = 10;
+  let uiColorIdx = 10;
+  let lastTs     = null;
+
+  // ── Audio ────────────────────────────────────────────────────
+  let analyser = null, timeDomain = null;
+  let micActive = false, micStream = null, audioCtx = null;
+  let parentAudio = null;
+
+  // ── Render ───────────────────────────────────────────────────
+  function frame(ts) {
+    if (!lastTs) lastTs = ts;
+    const dt = Math.min((ts - lastTs) / 1000, 0.05);
+    lastTs = ts;
+
+    // Audio
+    let rms = 0;
+    if (micActive || parentAudio) {
+      if (micActive) {
+        analyser.getByteTimeDomainData(timeDomain);
+        let sq = 0;
+        for (let k = 0; k < timeDomain.length; k++) {
+          const d = timeDomain[k] / 255 - 0.5; sq += d * d;
+        }
+        rms = Math.sqrt(sq / timeDomain.length);
+      } else { rms = parentAudio.rms; }
+      ampLevel += (rms * 5 - ampLevel) * 0.15;
+      if (rms > 0.05) speedBump = Math.max(speedBump, rms * 4);
+    } else {
+      ampLevel *= 0.92;
+    }
+    speedBump *= 0.93;
+
+    // Move seeds — audio increases speed
+    const speedMul = 1 + ampLevel * 0.8 + speedBump * 0.15;
+    for (const s of seeds) {
+      s.x += s.vx * dt * speedMul;
+      s.y += s.vy * dt * speedMul;
+      // Bounce off walls
+      if (s.x < 0)  { s.x = 0;  s.vx = Math.abs(s.vx); }
+      if (s.x > W)  { s.x = W;  s.vx = -Math.abs(s.vx); }
+      if (s.y < 0)  { s.y = 0;  s.vy = Math.abs(s.vy); }
+      if (s.y > H)  { s.y = H;  s.vy = -Math.abs(s.vy); }
+      // Audio perturbs direction gently
+      if (ampLevel > 0.1) {
+        s.vx += (Math.random() - 0.5) * ampLevel * 2;
+        s.vy += (Math.random() - 0.5) * ampLevel * 2;
+        const spd = Math.sqrt(s.vx * s.vx + s.vy * s.vy);
+        if (spd > 20) { s.vx *= 20 / spd; s.vy *= 20 / spd; }
+      }
+    }
+
+    const voronoiLines = computeVoronoiEdges(ts);
+
+    ctx.clearRect(0, 0, W, H);
+
+    // ── Three-pass glow render ───────────────────────────────
+    const passes = [
+      { blur: 14, alpha: 0.22, lw: 3.0 },
+      { blur: 4,  alpha: 0.50, lw: 1.5 },
+      { blur: 0,  alpha: 0.90, lw: 0.8 },
+    ];
+
+    for (const { blur, alpha, lw } of passes) {
+      ctx.strokeStyle = lineColor;
+      ctx.fillStyle   = lineColor;
+      ctx.shadowColor = lineColor;
+      ctx.shadowBlur  = blur;
+      ctx.lineWidth   = lw;
+      ctx.globalAlpha = alpha;
+
+      // Draw solid edges
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      for (const [x0, y0, x1, y1, t] of voronoiLines) {
+        if (t < 1) continue;
+        ctx.moveTo(x0, y0);
+        ctx.lineTo(x1, y1);
+      }
+      ctx.stroke();
+
+      // Draw new edges as dashed
+      ctx.setLineDash([6, 4]);
+      ctx.lineDashOffset = -ts * 0.012;
+      ctx.beginPath();
+      for (const [x0, y0, x1, y1, t] of voronoiLines) {
+        if (t >= 1) continue;
+        ctx.moveTo(x0, y0);
+        ctx.lineTo(x1, y1);
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Draw seed points
+      ctx.globalAlpha = alpha * 0.5;
+      for (const s of seeds) {
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, lw * 1.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // ── Seed labels: nearest-neighbor distance ─────────────────
+    ctx.font         = '14px "Share Tech Mono", monospace';
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillStyle    = lineColor;
+    ctx.shadowColor  = lineColor;
+    for (let i = 0; i < seeds.length; i++) {
+      let minD = Infinity;
+      for (let j = 0; j < seeds.length; j++) {
+        if (j === i) continue;
+        const dx = seeds[i].x - seeds[j].x, dy = seeds[i].y - seeds[j].y;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        if (d < minD) minD = d;
+      }
+      const flicker = 0.35 + Math.random() * 0.45;
+      ctx.globalAlpha = flicker;
+      ctx.shadowBlur  = 4 + ampLevel * 6;
+      ctx.fillText(Math.round(minD), seeds[i].x, seeds[i].y - 8);
+    }
+
+    ctx.globalAlpha = 1;
+    ctx.shadowBlur  = 0;
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // ── T key: scatter seeds ─────────────────────────────────────
+  function triggerPulse() {
+    speedBump = Math.max(speedBump, 4.5);
+    for (const s of seeds) {
+      s.vx = (Math.random() - 0.5) * 30;
+      s.vy = (Math.random() - 0.5) * 30;
+    }
+  }
+  window.addEventListener('keydown', e => {
+    if (e.key === 't' || e.key === 'T') triggerPulse();
+  });
+  document.getElementById('pkey').addEventListener('click', triggerPulse);
+  canvas.addEventListener('click', triggerPulse);
+
+  // ── Grain ───────────────────────────────────────────────────
+  let grainOn = true;
+  const grainEl = document.getElementById('grain-cv');
+  const grainCx = grainEl.getContext('2d');
+  let grainImg = null;
+  function drawGrainFrame() {
+    if (!grainOn) return;
+    const gW = Math.ceil(window.innerWidth  / 2);
+    const gH = Math.ceil(window.innerHeight / 2);
+    if (grainEl.width !== gW || grainEl.height !== gH) {
+      grainEl.width = gW; grainEl.height = gH;
+      grainImg = grainCx.createImageData(gW, gH);
+    }
+    const data = grainImg.data;
+    for (let i = 0; i < data.length; i += 4) {
+      const v = Math.random() * 255 | 0;
+      data[i] = data[i+1] = data[i+2] = v;
+      data[i+3] = Math.random() * 30 | 0;
+    }
+    grainCx.putImageData(grainImg, 0, 0);
+    requestAnimationFrame(drawGrainFrame);
+  }
+  function toggleGrain() {
+    grainOn = !grainOn;
+    if (grainOn) drawGrainFrame();
+  }
+  window.addEventListener('keydown', e => { if (e.key === 'g' || e.key === 'G') toggleGrain(); });
+  drawGrainFrame();
+
+  // ── Mic toggle ──────────────────────────────────────────────
+  const btn = document.getElementById('btn');
+  btn.addEventListener('click', async () => {
+    if (micActive) {
+      micActive = false; btn.style.opacity = '0.4';
+      micStream?.getTracks().forEach(t => t.stop());
+      audioCtx?.close();
+      micStream = audioCtx = analyser = timeDomain = null;
+      ampLevel = 0; return;
+    }
+    try {
+      micStream  = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      audioCtx   = new (window.AudioContext || window.webkitAudioContext)();
+      const src  = audioCtx.createMediaStreamSource(micStream);
+      analyser   = audioCtx.createAnalyser();
+      analyser.fftSize = 2048; analyser.smoothingTimeConstant = 0.5;
+      src.connect(analyser);
+      timeDomain = new Uint8Array(analyser.fftSize);
+      micActive  = true; btn.style.opacity = '';
+    } catch { /* permission denied */ }
+  });
+
+  // ── C-key modifier ──────────────────────────────────────────
+  let cHeld = false;
+  window.addEventListener('keyup', e => { if (e.isTrusted) window.parent?.postMessage({ type: 'childKeyup', key: e.key }, '*'); if (e.key==='c'||e.key==='C') cHeld=false; });
+
+  // ── VGA 16-color legend ─────────────────────────────────────
+  const POOL   = '.,:;+*#@0123456789';
+  const PRIMES = ['2','3','5','7','11','13','17','19','/'];
+  const rc = () => POOL[Math.floor(Math.random() * POOL.length)];
+  const rb = () => String.fromCodePoint(0x2801 + Math.floor(Math.random() * 255));
+  const rp = () => PRIMES[Math.floor(Math.random() * PRIMES.length)];
+  const VGA = [
+    '#000000','#0000AA','#00AA00','#00AAAA',
+    '#AA0000','#AA00AA','#AA5500','#AAAAAA',
+    '#555555','#5555FF','#55FF55','#55FFFF',
+    '#FF5555','#FF55FF','#FFFF55','#FFFFFF',
+  ];
+  const legendEl    = document.getElementById('legend');
+  const opsEl       = document.getElementById('ops');
+  const zkoEl       = document.getElementById('zko');
+  const legendSpans = VGA.map(col => {
+    const s = document.createElement('span');
+    s.style.color = col; s.style.cursor = 'pointer'; s.textContent = rc();
+    s.addEventListener('click', () => {
+      if (cHeld) {
+        btn.style.color   = col; opsEl.style.color = col; zkoEl.style.color = col;
+        document.getElementById('ckey').style.color  = col;
+        document.getElementById('pgkeys').style.color = col;
+        document.getElementById('speed').style.color  = col;
+      } else { lineColor = col; colorIdx = VGA.indexOf(col); }
+    });
+    legendEl.appendChild(s); return s;
+  });
+
+  zkoEl.textContent = rc()+rc()+rc()+rc();
+  btn.textContent   = rb();
+  opsEl.textContent = rp()+rp();
+
+  let cycleMs = 140;
+  function cycleFn() {
+    btn.textContent = rb(); opsEl.textContent = rp()+rp();
+    zkoEl.textContent = rc()+rc()+rc()+rc(); legendSpans.forEach(s => s.textContent = rc());
+  }
+  let cycleId = setInterval(cycleFn, cycleMs);
+
+  function updateSpeedUI() {
+    const sl = document.getElementById('slower');
+    const fa = document.getElementById('faster');
+    sl.style.opacity = cycleMs >= 560 ? '0.4' : '1'; sl.style.pointerEvents = cycleMs >= 560 ? 'none' : '';
+    fa.style.opacity = cycleMs <= 140 ? '0.4' : '1'; fa.style.pointerEvents = cycleMs <= 140 ? 'none' : '';
+  }
+  updateSpeedUI();
+
+  document.getElementById('slower').addEventListener('click', () => {
+    cycleMs = Math.min(560, cycleMs + 140);
+    clearInterval(cycleId); cycleId = setInterval(cycleFn, cycleMs); updateSpeedUI();
+  });
+  document.getElementById('faster').addEventListener('click', () => {
+    cycleMs = Math.max(140, cycleMs - 140);
+    clearInterval(cycleId); cycleId = setInterval(cycleFn, cycleMs); updateSpeedUI();
+  });
+
+  window.addEventListener('keydown', e => {
+    if (e.isTrusted) window.parent?.postMessage({ type: 'childKey', key: e.key, shiftKey: !!e.shiftKey }, '*');
+    if (e.key === 'c' || e.key === 'C') { cHeld = true; return; }
+    if      (e.key === 'ArrowLeft'  && !cHeld) {
+      cycleMs = Math.min(560, cycleMs + 140);
+      clearInterval(cycleId); cycleId = setInterval(cycleFn, cycleMs); updateSpeedUI();
+    } else if (e.key === 'ArrowRight' && !cHeld) {
+      cycleMs = Math.max(140, cycleMs - 140);
+      clearInterval(cycleId); cycleId = setInterval(cycleFn, cycleMs); updateSpeedUI();
+    } else if (!cHeld && e.key === 'ArrowUp') {
+      colorIdx = (colorIdx - 1 + VGA.length) % VGA.length; lineColor = VGA[colorIdx];
+    } else if (!cHeld && e.key === 'ArrowDown') {
+      colorIdx = (colorIdx + 1) % VGA.length; lineColor = VGA[colorIdx];
+    } else if (cHeld && e.key === 'ArrowUp') {
+      uiColorIdx = (uiColorIdx - 1 + VGA.length) % VGA.length;
+      btn.style.color   = VGA[uiColorIdx]; opsEl.style.color = VGA[uiColorIdx]; zkoEl.style.color = VGA[uiColorIdx];
+      document.getElementById('ckey').style.color   = VGA[uiColorIdx];
+      document.getElementById('pgkeys').style.color = VGA[uiColorIdx];
+      document.getElementById('speed').style.color  = VGA[uiColorIdx];
+    } else if (cHeld && e.key === 'ArrowDown') {
+      uiColorIdx = (uiColorIdx + 1) % VGA.length;
+      btn.style.color   = VGA[uiColorIdx]; opsEl.style.color = VGA[uiColorIdx]; zkoEl.style.color = VGA[uiColorIdx];
+      document.getElementById('ckey').style.color   = VGA[uiColorIdx];
+      document.getElementById('pgkeys').style.color = VGA[uiColorIdx];
+      document.getElementById('speed').style.color  = VGA[uiColorIdx];
+    }
+  });
+
+  // ── postMessage bridge (keyboard from parent window) ──────────
+  window.addEventListener('message', e => {
+    if (e.data?.type === 'key') {
+      if (e.data.cHeld !== undefined) cHeld = !!e.data.cHeld;
+      window.dispatchEvent(new KeyboardEvent('keydown', {key:e.data.key, shiftKey:!!e.data.shiftKey, bubbles:true}));
+    }
+    else if (e.data?.type === 'keyup')
+      window.dispatchEvent(new KeyboardEvent('keyup', {key:e.data.key, bubbles:true}));
+    else if (e.data?.type === 'audioData')
+      parentAudio = e.data;
+  });
+
+  // Randomize colors on load
+  (function() {
+    const GOOD = [6,11,13,14,15];
+    colorIdx  = GOOD[Math.floor(Math.random() * GOOD.length)];
+    lineColor = VGA[colorIdx];
+    const _uiPool = GOOD.filter(i => i !== colorIdx);
+    uiColorIdx = _uiPool[Math.floor(Math.random() * _uiPool.length)];
+    const _uc = VGA[uiColorIdx];
+    if (btn)   btn.style.color   = _uc;
+    if (opsEl) opsEl.style.color = _uc;
+    if (zkoEl) zkoEl.style.color = _uc;
+    const _ck = document.getElementById('ckey');
+    const _tk = document.getElementById('pgkeys');
+    const _sp = document.getElementById('speed');
+    if (_ck) _ck.style.color = _uc;
+    if (_tk) _tk.style.color = _uc;
+    if (_sp) _sp.style.color = _uc;
+  })();
+</script>
+</body>
+</html>

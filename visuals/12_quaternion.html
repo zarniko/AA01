@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Quaternion</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #000;
+    height: 100vh;
+    overflow: hidden;
+    font-family: 'Share Tech Mono', monospace;
+  }
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: radial-gradient(ellipse at center, #0a0f00 0%, #000 70%);
+    z-index: 0;
+  }
+  #canvas {
+    position: fixed;
+    inset: 0;
+    z-index: 1;
+    display: block;
+  }
+  .scanline {
+    position: fixed;
+    inset: 0;
+    background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.08) 2px, rgba(0,0,0,0.08) 4px);
+    pointer-events: none;
+    z-index: 2;
+  }
+  .vignette {
+    position: fixed;
+    inset: 0;
+    background: radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.7) 100%);
+    pointer-events: none;
+    z-index: 3;
+  }
+  #btn {
+    all: unset;
+    position: fixed;
+    top: 20px;
+    left: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    color: #39ff14;
+    letter-spacing: 3px;
+    cursor: pointer;
+  }
+  #qgkeys {
+    position: fixed;
+    top: 54px;
+    left: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    letter-spacing: 3px;
+    color: #39ff14;
+    display: flex;
+    gap: 1ch;
+  }
+  #qkey { cursor: pointer; }
+  #grain-cv {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 5;
+  }
+  #legend {
+    position: fixed;
+    top: 20px;
+    right: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    display: grid;
+    grid-template-columns: repeat(8, 1em);
+    gap: 4px 6px;
+    line-height: 1.4;
+    text-align: center;
+  }
+  #zko {
+    position: fixed;
+    bottom: 20px;
+    left: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    letter-spacing: 3px;
+    color: #39ff14;
+    text-decoration: none;
+    cursor: pointer;
+  }
+  #ops {
+    position: fixed;
+    bottom: 20px;
+    right: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    letter-spacing: 3px;
+    color: #39ff14;
+  }
+  #speed {
+    position: fixed;
+    bottom: 40px;
+    right: 24px;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    letter-spacing: 3px;
+    color: #39ff14;
+    user-select: none;
+  }
+  #speed span { cursor: pointer; }
+  #ckey {
+    position: fixed;
+    top: 68px;
+    right: 24px;
+    width: 1em;
+    z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px;
+    line-height: 1.4;
+    color: #39ff14;
+    text-align: center;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div class="scanline"></div>
+<div class="vignette"></div>
+<button id="btn"></button>
+<div id="qgkeys">
+  <div id="qkey">T</div>
+</div>
+<canvas id="grain-cv"></canvas>
+<div id="legend"></div>
+<div id="ops"></div>
+<div id="speed"><span id="slower">&lt;</span> <span id="faster">&gt;</span></div>
+<div id="ckey">C</div>
+<a id="zko" href="https://zko.io" target="_blank" rel="noopener"></a>
+<canvas id="canvas"></canvas>
+<script>
+  const canvas = document.getElementById('canvas');
+  const ctx    = canvas.getContext('2d');
+
+  let W, H;
+  function resize() {
+    W = canvas.width  = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  // ── Quaternion: q = 0 + 2i - j - 3k ─────────────────────
+  // Pure quaternion (w=0); vector part is the rotation axis.
+  // |q| = √14 ≈ 3.742  →  unit axis = (2,-1,-3)/√14
+  const QX = 2, QY = -1, QZ = -3;
+  const QMAG = Math.sqrt(QX*QX + QY*QY + QZ*QZ); // √14
+  const QNX  = QX / QMAG;
+  const QNY  = QY / QMAG;
+  const QNZ  = QZ / QMAG;
+
+  // Quaternion multiplication  [w, x, y, z]
+  function qMul([w1,x1,y1,z1], [w2,x2,y2,z2]) {
+    return [
+      w1*w2 - x1*x2 - y1*y2 - z1*z2,
+      w1*x2 + x1*w2 + y1*z2 - z1*y2,
+      w1*y2 - x1*z2 + y1*w2 + z1*x2,
+      w1*z2 + x1*y2 - y1*x2 + z1*w2,
+    ];
+  }
+
+  // Rotate 3-vector by unit quaternion:  r = q · p · q*
+  function qRot(v, q) {
+    const r = qMul(qMul(q, [0, v[0], v[1], v[2]]), [q[0], -q[1], -q[2], -q[3]]);
+    return [r[1], r[2], r[3]];
+  }
+
+  // Build unit rotation quaternion from angle theta around (QNX,QNY,QNZ)
+  function makeQ(theta) {
+    const c = Math.cos(theta / 2), s = Math.sin(theta / 2);
+    return [c, s*QNX, s*QNY, s*QNZ];
+  }
+
+  // ── View projection ───────────────────────────────────────
+  const VIEW_YAW   = Math.PI / 5;
+  const VIEW_PITCH = Math.atan(1 / Math.sqrt(2));
+
+  function rotY([x, y, z], a) {
+    return [x*Math.cos(a) + z*Math.sin(a), y, -x*Math.sin(a) + z*Math.cos(a)];
+  }
+  function rotX([x, y, z], a) {
+    return [x, y*Math.cos(a) - z*Math.sin(a), y*Math.sin(a) + z*Math.cos(a)];
+  }
+  function toView(v) { return rotX(rotY(v, VIEW_YAW), VIEW_PITCH); }
+  function project([x, y]) {
+    const s = Math.min(W, H) * 0.408;
+    return [x*s + W/2, -y*s + H * 0.50];
+  }
+
+  // ── Geometry ──────────────────────────────────────────────
+  const N_SEG = 96;
+
+  // Three great circles in the XY, XZ, YZ planes
+  function makeCircle(plane) {
+    const pts = [];
+    for (let i = 0; i <= N_SEG; i++) {
+      const a = i / N_SEG * Math.PI * 2;
+      const c = Math.cos(a), s = Math.sin(a);
+      pts.push(plane === 0 ? [c, s, 0] : plane === 1 ? [c, 0, s] : [0, c, s]);
+    }
+    return pts;
+  }
+  const BASE_CIRCLES = [makeCircle(0), makeCircle(1), makeCircle(2)];
+
+  // Per-circle breathing: base radius, amplitude, frequency multiplier, phase offset
+  const CIRCLE_PARAMS = [
+    { base: 1.00, amp: 0.18, freq: 1.0, phase: 0                  },
+    { base: 0.85, amp: 0.18, freq: 1.5, phase: Math.PI * 2 / 3    },
+    { base: 0.70, amp: 0.18, freq: 2.0, phase: Math.PI * 4 / 3    },
+  ];
+
+  // Three orthonormal frame vectors
+  const FRAME_VECS   = [[1,0,0], [0,1,0], [0,0,1]];
+  const FRAME_LABELS = ['i', 'j', 'k'];
+
+  // Rotation axis endpoints — fixed in space, extend past unit sphere
+  const AXIS_R = 1.45;
+  const AXIS_A = [ QNX*AXIS_R,  QNY*AXIS_R,  QNZ*AXIS_R];
+  const AXIS_B = [-QNX*AXIS_R, -QNY*AXIS_R, -QNZ*AXIS_R];
+
+  // ── State ─────────────────────────────────────────────────
+  let theta     = 0;
+  let omega     = 0.45;   // base angular velocity (rad/s)
+  let speedBump = 0;
+  let ampLevel  = 0;
+  let lineColor  = '#39ff14';
+  let colorIdx   = 10;
+  let uiColorIdx = 10;
+  let lastTs     = null;
+
+  // ── Circle snapshots (ghost trail every 0.1s) ─────────────
+  const snapshots   = [];
+  let   lastSnapTs  = 0;
+
+  // ── Audio ─────────────────────────────────────────────────
+  let analyser = null, timeDomain = null;
+  let micActive = false, micStream = null, audioCtx = null;
+  let parentAudio = null;
+
+  // ── Render ────────────────────────────────────────────────
+  function frame(ts) {
+    if (!lastTs) lastTs = ts;
+    const dt = Math.min((ts - lastTs) / 1000, 0.05);
+    lastTs = ts;
+
+    if (micActive || parentAudio) {
+      let rms;
+      if (micActive) {
+        analyser.getByteTimeDomainData(timeDomain);
+        let sq = 0;
+        for (let k = 0; k < timeDomain.length; k++) {
+          const d = timeDomain[k] / 255 - 0.5;
+          sq += d * d;
+        }
+        rms = Math.sqrt(sq / timeDomain.length);
+      } else { rms = parentAudio.rms; }
+      ampLevel += (rms * 5 - ampLevel) * 0.15;
+      if (rms > 0.05) speedBump = Math.max(speedBump, rms * 5);
+    } else {
+      ampLevel *= 0.92;
+    }
+    speedBump *= 0.93;
+
+    theta += omega * (1 + ampLevel * 2 + speedBump) * dt;
+
+    ctx.clearRect(0, 0, W, H);
+
+    const q = makeQ(theta);
+
+    // Transform circles → view space (with per-circle breathing radius)
+    const polylines = BASE_CIRCLES.map((circ, i) => {
+      const { base, amp, freq, phase } = CIRCLE_PARAMS[i];
+      const r  = base + amp * Math.sin(theta * freq + phase);
+      const tv = circ.map(v => toView(qRot([v[0]*r, v[1]*r, v[2]*r], q)));
+      return {
+        pts: tv.map(v => project(v)),
+        z:   tv.reduce((s, v) => s + v[2], 0) / tv.length,
+      };
+    });
+
+    // Transform frame vectors → view space
+    const frameVecs = FRAME_VECS.map(v => {
+      const tv = toView(qRot(v, q));
+      return { pt: project(tv), tv };
+    });
+
+    // Axis endpoints → view space (fixed)
+    const pA = project(toView(AXIS_A));
+    const pB = project(toView(AXIS_B));
+
+    // Origin in view space
+    const origin = project(toView([0, 0, 0]));
+
+    // Snapshot every 0.1s
+    if (ts - lastSnapTs > 100) {
+      snapshots.push(polylines.map(pl => ({ pts: pl.pts.map(p => [...p]), z: pl.z })));
+      if (snapshots.length > 64) snapshots.shift();
+      lastSnapTs = ts;
+    }
+
+    // Draw ghost snapshots at 20% opacity — dashed, no glow
+    ctx.strokeStyle = lineColor;
+    ctx.shadowBlur  = 0;
+    ctx.globalAlpha = 0.20;
+    ctx.lineWidth   = 0.65;
+    ctx.setLineDash([3, 5]);
+    for (const snap of snapshots) {
+      [...snap].sort((a, b) => a.z - b.z).forEach(({ pts }) => {
+        ctx.beginPath();
+        ctx.moveTo(pts[0][0], pts[0][1]);
+        for (let k = 1; k < pts.length; k++) ctx.lineTo(pts[k][0], pts[k][1]);
+        ctx.stroke();
+      });
+    }
+    ctx.setLineDash([]);
+
+    // ── Draw passes ──────────────────────────────────────────
+    const passes = [
+      { blur: 16, alpha: 0.20, lw: 3.0 },
+      { blur: 5,  alpha: 0.50, lw: 1.3 },
+      { blur: 0,  alpha: 0.90, lw: 0.65 },
+    ];
+
+    for (const { blur, alpha, lw } of passes) {
+      ctx.strokeStyle = lineColor;
+      ctx.shadowColor = lineColor;
+      ctx.shadowBlur  = blur;
+
+      // Rotation axis — dashed, extended beyond canvas
+      const axDx = pA[0] - pB[0], axDy = pA[1] - pB[1];
+      const axLen = Math.sqrt(axDx*axDx + axDy*axDy) || 1;
+      const ext = Math.max(W, H) * 3;
+      const pAx = [pA[0] + (axDx/axLen)*ext, pA[1] + (axDy/axLen)*ext];
+      const pBx = [pB[0] - (axDx/axLen)*ext, pB[1] - (axDy/axLen)*ext];
+      ctx.lineWidth   = lw;
+      ctx.globalAlpha = alpha * 0.28;
+      ctx.setLineDash([3, 6]);
+      ctx.lineDashOffset = -theta * 20;
+      ctx.beginPath();
+      ctx.moveTo(pBx[0], pBx[1]);
+      ctx.lineTo(pAx[0], pAx[1]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.lineDashOffset = 0;
+
+      // Great circles — sorted back to front
+      ctx.lineWidth   = lw;
+      ctx.globalAlpha = alpha;
+      [...polylines]
+        .sort((a, b) => a.z - b.z)
+        .forEach(({ pts }) => {
+          ctx.beginPath();
+          ctx.moveTo(pts[0][0], pts[0][1]);
+          for (let k = 1; k < pts.length; k++) ctx.lineTo(pts[k][0], pts[k][1]);
+          ctx.stroke();
+        });
+
+      // Frame vectors — slightly brighter
+      ctx.lineWidth   = lw * 1.6;
+      ctx.globalAlpha = alpha * 0.75;
+      frameVecs.forEach(({ pt }) => {
+        ctx.beginPath();
+        ctx.moveTo(origin[0], origin[1]);
+        ctx.lineTo(pt[0], pt[1]);
+        ctx.stroke();
+      });
+    }
+
+    // Frame vector labels (i, j, k) — independent flicker per label, audio-reactive
+    ctx.fillStyle    = lineColor;
+    ctx.shadowColor  = lineColor;
+    ctx.font         = '16px "Share Tech Mono", monospace';
+    ctx.textBaseline = 'middle';
+    frameVecs.forEach(({ pt }, i) => {
+      const dropout  = Math.random() < 0.06;
+      const base     = dropout ? Math.random() * 0.15 : 0.55 + Math.random() * 0.45;
+      const audioBoost = Math.min(0.3, ampLevel * 0.4);
+      ctx.globalAlpha = Math.min(1, base + audioBoost);
+      ctx.shadowBlur  = 7 + ampLevel * 8;
+      const dx = pt[0] - origin[0], dy = pt[1] - origin[1];
+      const len = Math.sqrt(dx*dx + dy*dy) || 1;
+      ctx.textAlign = pt[0] < W/2 ? 'right' : 'left';
+      ctx.fillText(FRAME_LABELS[i], pt[0] + (dx/len)*14, pt[1] + (dy/len)*14);
+    });
+
+    ctx.globalAlpha = 1;
+    ctx.shadowBlur  = 0;
+
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+
+  // ── Q key: spin pulse ─────────────────────────────────────
+  function triggerPulse() {
+    speedBump = Math.max(speedBump, 5.0);
+  }
+  window.addEventListener('keydown', e => {
+    if (e.key === 't' || e.key === 'T') triggerPulse();
+  });
+  document.getElementById('qkey').addEventListener('click', triggerPulse);
+  canvas.addEventListener('click', triggerPulse);
+
+  // ── Grain ─────────────────────────────────────────────────
+  let grainOn  = true;
+  const grainEl = document.getElementById('grain-cv');
+  const grainCx = grainEl.getContext('2d');
+  let grainImg  = null;
+  function drawGrainFrame() {
+    if (!grainOn) return;
+    const gW = Math.ceil(window.innerWidth  / 2);
+    const gH = Math.ceil(window.innerHeight / 2);
+    if (grainEl.width !== gW || grainEl.height !== gH) {
+      grainEl.width  = gW;
+      grainEl.height = gH;
+      grainImg = grainCx.createImageData(gW, gH);
+    }
+    const data = grainImg.data;
+    for (let i = 0; i < data.length; i += 4) {
+      const v = Math.random() * 255 | 0;
+      data[i] = data[i+1] = data[i+2] = v;
+      data[i+3] = Math.random() * 30 | 0;
+    }
+    grainCx.putImageData(grainImg, 0, 0);
+    requestAnimationFrame(drawGrainFrame);
+  }
+  function toggleGrain() {
+    grainOn = !grainOn;
+    if (grainOn) drawGrainFrame();
+  }
+  window.addEventListener('keydown', e => { if (e.key === 'g' || e.key === 'G') toggleGrain(); });
+  drawGrainFrame();
+
+  // ── Mic toggle ────────────────────────────────────────────
+  const btn = document.getElementById('btn');
+  btn.addEventListener('click', async () => {
+    if (micActive) {
+      micActive = false;
+      btn.style.opacity = '0.4';
+      micStream?.getTracks().forEach(t => t.stop());
+      audioCtx?.close();
+      micStream = audioCtx = analyser = timeDomain = null;
+      ampLevel = 0;
+      return;
+    }
+    try {
+      micStream  = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      audioCtx   = new (window.AudioContext || window.webkitAudioContext)();
+      const src  = audioCtx.createMediaStreamSource(micStream);
+      analyser   = audioCtx.createAnalyser();
+      analyser.fftSize               = 2048;
+      analyser.smoothingTimeConstant = 0.5;
+      src.connect(analyser);
+      timeDomain = new Uint8Array(analyser.fftSize);
+      micActive  = true;
+      btn.style.opacity = '';
+    } catch { /* permission denied */ }
+  });
+
+  // ── C-key modifier ────────────────────────────────────────
+  let cHeld = false;
+  window.addEventListener('keyup',   e => { if (e.isTrusted) window.parent?.postMessage({ type: 'childKeyup', key: e.key }, '*'); if (e.key==='c'||e.key==='C') cHeld=false; });
+
+  // ── VGA 16-color legend ───────────────────────────────────
+  const POOL   = '.,:;+*#@0123456789';
+  const PRIMES = ['2','3','5','7','11','13','17','19','/'];
+  const rc = () => POOL[Math.floor(Math.random() * POOL.length)];
+  const rb = () => String.fromCodePoint(0x2801 + Math.floor(Math.random() * 255));
+  const rp = () => PRIMES[Math.floor(Math.random() * PRIMES.length)];
+  const VGA = [
+    '#000000','#0000AA','#00AA00','#00AAAA',
+    '#AA0000','#AA00AA','#AA5500','#AAAAAA',
+    '#555555','#5555FF','#55FF55','#55FFFF',
+    '#FF5555','#FF55FF','#FFFF55','#FFFFFF',
+  ];
+
+  const legendEl    = document.getElementById('legend');
+  const legendSpans = VGA.map(col => {
+    const s = document.createElement('span');
+    s.style.color  = col;
+    s.style.cursor = 'pointer';
+    s.textContent  = rc();
+    s.addEventListener('click', () => {
+      if (cHeld) {
+        btn.style.color   = col;
+        opsEl.style.color = col;
+        zkoEl.style.color = col;
+        document.getElementById('ckey').style.color   = col;
+        document.getElementById('qgkeys').style.color = col;
+        document.getElementById('speed').style.color  = col;
+      } else {
+        lineColor = col;
+        colorIdx  = VGA.indexOf(col);
+      }
+    });
+    legendEl.appendChild(s);
+    return s;
+  });
+
+  const zkoEl = document.getElementById('zko');
+  zkoEl.textContent = rc()+rc()+rc()+rc();
+  btn.textContent   = rb();
+  const opsEl = document.getElementById('ops');
+  opsEl.textContent = rp()+rp();
+
+  let cycleMs = 140;
+  function cycleFn() {
+    btn.textContent   = rb();
+    opsEl.textContent = rp()+rp();
+    zkoEl.textContent = rc()+rc()+rc()+rc();
+    legendSpans.forEach(s => s.textContent = rc());
+  }
+  let cycleId = setInterval(cycleFn, cycleMs);
+
+  function updateSpeedUI() {
+    const sl = document.getElementById('slower');
+    const fa = document.getElementById('faster');
+    sl.style.opacity       = cycleMs >= 560 ? '0.4' : '1';
+    sl.style.pointerEvents = cycleMs >= 560 ? 'none' : '';
+    fa.style.opacity       = cycleMs <= 140 ? '0.4' : '1';
+    fa.style.pointerEvents = cycleMs <= 140 ? 'none' : '';
+  }
+  updateSpeedUI();
+
+  document.getElementById('slower').addEventListener('click', () => {
+    cycleMs = Math.min(560, cycleMs + 140);
+    clearInterval(cycleId); cycleId = setInterval(cycleFn, cycleMs); updateSpeedUI();
+  });
+  document.getElementById('faster').addEventListener('click', () => {
+    cycleMs = Math.max(140, cycleMs - 140);
+    clearInterval(cycleId); cycleId = setInterval(cycleFn, cycleMs); updateSpeedUI();
+  });
+
+  window.addEventListener('keydown', e => {
+    if (e.isTrusted) window.parent?.postMessage({ type: 'childKey', key: e.key, shiftKey: !!e.shiftKey }, '*');
+    if (e.key === 'c' || e.key === 'C') { cHeld = true; return; }
+    if      (e.key === 'ArrowLeft'  && !cHeld) {
+      cycleMs = Math.min(560, cycleMs + 140);
+      clearInterval(cycleId); cycleId = setInterval(cycleFn, cycleMs); updateSpeedUI();
+    } else if (e.key === 'ArrowRight' && !cHeld) {
+      cycleMs = Math.max(140, cycleMs - 140);
+      clearInterval(cycleId); cycleId = setInterval(cycleFn, cycleMs); updateSpeedUI();
+    } else if (!cHeld && e.key === 'ArrowUp') {
+      colorIdx = (colorIdx - 1 + VGA.length) % VGA.length;
+      lineColor = VGA[colorIdx];
+    } else if (!cHeld && e.key === 'ArrowDown') {
+      colorIdx = (colorIdx + 1) % VGA.length;
+      lineColor = VGA[colorIdx];
+    } else if (cHeld && e.key === 'ArrowUp') {
+      uiColorIdx = (uiColorIdx - 1 + VGA.length) % VGA.length;
+      btn.style.color   = VGA[uiColorIdx];
+      opsEl.style.color = VGA[uiColorIdx];
+      zkoEl.style.color = VGA[uiColorIdx];
+      document.getElementById('ckey').style.color   = VGA[uiColorIdx];
+      document.getElementById('qgkeys').style.color = VGA[uiColorIdx];
+      document.getElementById('speed').style.color  = VGA[uiColorIdx];
+    } else if (cHeld && e.key === 'ArrowDown') {
+      uiColorIdx = (uiColorIdx + 1) % VGA.length;
+      btn.style.color   = VGA[uiColorIdx];
+      opsEl.style.color = VGA[uiColorIdx];
+      zkoEl.style.color = VGA[uiColorIdx];
+      document.getElementById('ckey').style.color   = VGA[uiColorIdx];
+      document.getElementById('qgkeys').style.color = VGA[uiColorIdx];
+      document.getElementById('speed').style.color  = VGA[uiColorIdx];
+    }
+  });
+
+  // ── postMessage bridge (keyboard from parent window) ──────────
+  window.addEventListener('message', e => {
+    if (e.data?.type === 'key') {
+      if (e.data.cHeld !== undefined) cHeld = !!e.data.cHeld;
+      window.dispatchEvent(new KeyboardEvent('keydown', {key:e.data.key, shiftKey:!!e.data.shiftKey, bubbles:true}));
+    }
+    else if (e.data?.type === 'keyup')
+      window.dispatchEvent(new KeyboardEvent('keyup', {key:e.data.key, bubbles:true}));
+    else if (e.data?.type === 'audioData')
+      parentAudio = e.data;
+  });
+
+  // Randomize colors on load
+  (function() {
+    const GOOD = [6,11,13,14,15];
+    colorIdx  = GOOD[Math.floor(Math.random() * GOOD.length)];
+    lineColor = VGA[colorIdx];
+    const _uiPool = GOOD.filter(i => i !== colorIdx);
+    uiColorIdx = _uiPool[Math.floor(Math.random() * _uiPool.length)];
+    const _uc = VGA[uiColorIdx];
+    if (btn)   btn.style.color   = _uc;
+    if (opsEl) opsEl.style.color = _uc;
+    if (zkoEl) zkoEl.style.color = _uc;
+    const _ck = document.getElementById('ckey');
+    const _tk = document.getElementById('tgkeys');
+    const _sp = document.getElementById('speed');
+    if (_ck) _ck.style.color = _uc;
+    if (_tk) _tk.style.color = _uc;
+    if (_sp) _sp.style.color = _uc;
+  })();
+</script>
+</body>
+</html>

@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Intersect</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #000;
+    height: 100vh;
+    overflow: hidden;
+    font-family: 'Share Tech Mono', monospace;
+  }
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: radial-gradient(ellipse at center, #0a0f00 0%, #000 70%);
+    z-index: 0;
+  }
+  #canvas { position: fixed; inset: 0; z-index: 1; display: block; }
+  .scanline {
+    position: fixed; inset: 0;
+    background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.08) 2px, rgba(0,0,0,0.08) 4px);
+    pointer-events: none; z-index: 2;
+  }
+  .vignette {
+    position: fixed; inset: 0;
+    background: radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.7) 100%);
+    pointer-events: none; z-index: 3;
+  }
+  #btn {
+    all: unset; position: fixed; top: 20px; left: 24px; z-index: 4;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px;
+    color: #39ff14; letter-spacing: 3px; cursor: pointer;
+  }
+  #pgkeys {
+    position: fixed; top: 54px; left: 24px; z-index: 4;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px;
+    letter-spacing: 3px; color: #39ff14; display: flex; gap: 1ch;
+  }
+  #pkey { cursor: pointer; }
+  #grain-cv {
+    position: fixed; inset: 0; width: 100%; height: 100%;
+    pointer-events: none; z-index: 5;
+  }
+  #legend {
+    position: fixed; top: 20px; right: 24px; z-index: 4;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px;
+    display: grid; grid-template-columns: repeat(8, 1em);
+    gap: 4px 6px; line-height: 1.4; text-align: center;
+  }
+  #zko {
+    position: fixed; bottom: 20px; left: 24px; z-index: 4;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px;
+    letter-spacing: 3px; color: #39ff14; text-decoration: none; cursor: pointer;
+  }
+  #ops {
+    position: fixed; bottom: 20px; right: 24px; z-index: 4;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px;
+    letter-spacing: 3px; color: #39ff14;
+  }
+  #speed {
+    position: fixed; bottom: 40px; right: 24px; z-index: 4;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px;
+    letter-spacing: 3px; color: #39ff14; user-select: none;
+  }
+  #speed span { cursor: pointer; }
+  #ckey {
+    position: fixed; top: 68px; right: 24px; width: 1em; z-index: 4;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px;
+    line-height: 1.4; color: #39ff14; text-align: center; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div class="scanline"></div>
+<div class="vignette"></div>
+<button id="btn"></button>
+<div id="pgkeys">
+  <div id="pkey">T</div>
+</div>
+<canvas id="grain-cv"></canvas>
+<div id="legend"></div>
+<div id="ops"></div>
+<div id="speed"><span id="slower">&lt;</span> <span id="faster">&gt;</span></div>
+<div id="ckey">C</div>
+<a id="zko" href="https://zko.io" target="_blank" rel="noopener"></a>
+<canvas id="canvas"></canvas>
+<script>
+  const canvas = document.getElementById('canvas');
+  const ctx    = canvas.getContext('2d');
+  let W, H;
+  function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+  resize();
+  window.addEventListener('resize', resize);
+
+  // ── Plane geometry ───────────────────────────────────────────
+  const PS = 1.7;   // plane half-extent (square)
+  const GRID_LINES = 8;
+
+  // ── View projection (fixed isometric) ────────────────────────
+  const VIEW_YAW   = Math.PI / 5;
+  const VIEW_PITCH = Math.PI / 12;
+
+  function rotY([x, y, z], a) {
+    return [x*Math.cos(a) + z*Math.sin(a), y, -x*Math.sin(a) + z*Math.cos(a)];
+  }
+  function rotX([x, y, z], a) {
+    return [x, y*Math.cos(a) - z*Math.sin(a), y*Math.sin(a) + z*Math.cos(a)];
+  }
+  function toView(v) { return rotX(rotY(v, VIEW_YAW), VIEW_PITCH); }
+  function project([x, y]) {
+    const s = Math.min(W, H) * 0.19;
+    return [x*s + W/2, -y*s + H/2];
+  }
+
+  // ── Build plane vertices ─────────────────────────────────────
+  // Two planes share an intersection line along the X axis (y=0, z=0).
+  // Each plane pivots around the X axis by ±halfAngle.
+  // Plane P: rotated by +halfAngle around X
+  // Plane Q: rotated by -halfAngle around X
+  function planeCorners(halfAngle) {
+    const cy = Math.cos(halfAngle), sy = Math.sin(halfAngle);
+    // Plane P corners (rotate local Y by halfAngle into Y-Z)
+    const P = [
+      [-PS, -PS*cy, -PS*sy], [ PS, -PS*cy, -PS*sy],
+      [ PS,  PS*cy,  PS*sy], [-PS,  PS*cy,  PS*sy],
+    ];
+    // Plane Q corners (rotate local Y by -halfAngle)
+    const Q = [
+      [-PS, -PS*cy,  PS*sy], [ PS, -PS*cy,  PS*sy],
+      [ PS,  PS*cy, -PS*sy], [-PS,  PS*cy, -PS*sy],
+    ];
+    return { P, Q };
+  }
+
+  function planeGridLines(corners) {
+    const lines = [];
+    for (let i = 0; i <= GRID_LINES; i++) {
+      const t = i / GRID_LINES;
+      // Horizontal lines
+      const lh0 = corners[0].map((v, k) => v + (corners[3][k] - corners[0][k]) * t);
+      const lh1 = corners[1].map((v, k) => v + (corners[2][k] - corners[1][k]) * t);
+      lines.push([lh0, lh1]);
+      // Vertical lines
+      const lv0 = corners[0].map((v, k) => v + (corners[1][k] - corners[0][k]) * t);
+      const lv1 = corners[3].map((v, k) => v + (corners[2][k] - corners[3][k]) * t);
+      lines.push([lv0, lv1]);
+    }
+    return lines;
+  }
+
+  // ── State ────────────────────────────────────────────────────
+  let speedBump  = 0;
+  let ampLevel   = 0;
+  let lineColor  = '#39ff14';
+  let colorIdx   = 10;
+  let uiColorIdx = 10;
+  let lastTs     = null;
+
+  // Dihedral half-angle: resting at ~40°, audio opens/closes it
+  let halfAngle       = Math.PI * 0.22;
+  let targetHalfAngle = halfAngle;
+  const REST_ANGLE    = Math.PI * 0.22;
+
+  // ── Audio ────────────────────────────────────────────────────
+  let analyser = null, timeDomain = null, freqData = null;
+  let micActive = false, micStream = null, audioCtx = null;
+  let parentAudio = null;
+
+  // ── Render ───────────────────────────────────────────────────
+  function frame(ts) {
+    if (!lastTs) lastTs = ts;
+    const dt = Math.min((ts - lastTs) / 1000, 0.05);
+    lastTs = ts;
+
+    let rms = 0;
+    if (micActive || parentAudio) {
+      if (micActive) {
+        analyser.getByteTimeDomainData(timeDomain);
+        let sq = 0;
+        for (let k = 0; k < timeDomain.length; k++) {
+          const d = timeDomain[k] / 255 - 0.5; sq += d * d;
+        }
+        rms = Math.sqrt(sq / timeDomain.length);
+      } else { rms = parentAudio.rms; }
+      ampLevel += (rms * 5 - ampLevel) * 0.15;
+      if (rms > 0.05) speedBump = Math.max(speedBump, rms * 4);
+    } else {
+      ampLevel *= 0.92;
+    }
+    speedBump *= 0.93;
+
+    // Audio drives dihedral angle: louder → flatter (wider angle)
+    targetHalfAngle = REST_ANGLE + ampLevel * 0.55 + speedBump * 0.08;
+    targetHalfAngle = Math.min(Math.PI * 0.48, Math.max(Math.PI * 0.05, targetHalfAngle));
+    halfAngle += (targetHalfAngle - halfAngle) * 0.12;
+
+    const { P, Q } = planeCorners(halfAngle);
+    const gridP = planeGridLines(P);
+    const gridQ = planeGridLines(Q);
+
+    // Intersection line along X axis
+    const intA = [-PS * 1.15, 0, 0];
+    const intB = [ PS * 1.15, 0, 0];
+
+    ctx.clearRect(0, 0, W, H);
+
+    // Dihedral angle label
+    const dihedralDeg = Math.round(halfAngle * 2 * 180 / Math.PI);
+
+    // ── Three-pass glow render ───────────────────────────────
+    const passes = [
+      { blur: 14, alpha: 0.22, lw: 3.0 },
+      { blur: 4,  alpha: 0.50, lw: 1.5 },
+      { blur: 0,  alpha: 0.90, lw: 0.8 },
+    ];
+
+    for (const { blur, alpha, lw } of passes) {
+      ctx.strokeStyle = lineColor;
+      ctx.shadowColor = lineColor;
+      ctx.shadowBlur  = blur;
+      ctx.setLineDash([]);
+
+      // Draw plane outlines
+      for (const corners of [P, Q]) {
+        const cs = corners.map(v => project(toView(v)));
+        ctx.lineWidth   = lw;
+        ctx.globalAlpha = alpha;
+        ctx.beginPath();
+        ctx.moveTo(cs[0][0], cs[0][1]);
+        for (let k = 1; k < cs.length; k++) ctx.lineTo(cs[k][0], cs[k][1]);
+        ctx.closePath();
+        ctx.stroke();
+      }
+
+      // Draw grid lines on each plane
+      for (const grid of [gridP, gridQ]) {
+        ctx.lineWidth   = lw * 0.35;
+        ctx.globalAlpha = alpha * 0.25;
+        for (const [a, b] of grid) {
+          const pa = project(toView(a));
+          const pb = project(toView(b));
+          ctx.beginPath();
+          ctx.moveTo(pa[0], pa[1]);
+          ctx.lineTo(pb[0], pb[1]);
+          ctx.stroke();
+        }
+      }
+
+      // Intersection line (brighter, dashed)
+      ctx.lineWidth   = lw * 1.4;
+      ctx.globalAlpha = alpha;
+      ctx.setLineDash([6, 4]);
+      ctx.lineDashOffset = -ts * 0.012;
+      const iA = project(toView(intA));
+      const iB = project(toView(intB));
+      ctx.beginPath();
+      ctx.moveTo(iA[0], iA[1]);
+      ctx.lineTo(iB[0], iB[1]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // ── Labels ──────────────────────────────────────────────
+    ctx.fillStyle   = lineColor;
+    ctx.shadowColor = lineColor;
+    ctx.shadowBlur  = 4 + ampLevel * 7;
+    ctx.font        = '13px "Share Tech Mono", monospace';
+    ctx.textBaseline = 'middle';
+
+    // "m" label at end of intersection line
+    const mPos = project(toView([PS * 1.25, 0, 0]));
+    ctx.globalAlpha = 0.7 + Math.random() * 0.2;
+    ctx.textAlign   = 'left';
+    ctx.fillText('m', mPos[0] + 6, mPos[1] - 4);
+
+    // "P" label on plane P
+    const pLabel = project(toView(P[0].map((v, k) => v * 0.6 + P[3][k] * 0.4)));
+    ctx.globalAlpha = 0.6 + Math.random() * 0.25;
+    ctx.textAlign   = 'center';
+    ctx.fillText('P', pLabel[0] - 14, pLabel[1]);
+
+    // "Q" label on plane Q
+    const qLabel = project(toView(Q[1].map((v, k) => v * 0.6 + Q[2][k] * 0.4)));
+    ctx.globalAlpha = 0.6 + Math.random() * 0.25;
+    ctx.textAlign   = 'center';
+    ctx.fillText('Q', qLabel[0] + 14, qLabel[1]);
+
+    // Angle label
+    const anglePos = project(toView([0, -0.3, 0]));
+    ctx.globalAlpha = 0.5 + Math.random() * 0.3;
+    ctx.font        = '12px "Share Tech Mono", monospace';
+    ctx.textAlign   = 'center';
+    ctx.fillText('θ=' + dihedralDeg + '°', anglePos[0], anglePos[1] + 20);
+
+    ctx.globalAlpha = 1;
+    ctx.shadowBlur  = 0;
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // ── T key: pulse ────────────────────────────────────────────
+  function triggerPulse() { speedBump = Math.max(speedBump, 4.5); }
+  window.addEventListener('keydown', e => {
+    if (e.key === 't' || e.key === 'T') triggerPulse();
+  });
+  document.getElementById('pkey').addEventListener('click', triggerPulse);
+  canvas.addEventListener('click', triggerPulse);
+
+  // ── Grain ───────────────────────────────────────────────────
+  let grainOn = true;
+  const grainEl = document.getElementById('grain-cv');
+  const grainCx = grainEl.getContext('2d');
+  let grainImg = null;
+  function drawGrainFrame() {
+    if (!grainOn) return;
+    const gW = Math.ceil(window.innerWidth  / 2);
+    const gH = Math.ceil(window.innerHeight / 2);
+    if (grainEl.width !== gW || grainEl.height !== gH) {
+      grainEl.width = gW; grainEl.height = gH;
+      grainImg = grainCx.createImageData(gW, gH);
+    }
+    const data = grainImg.data;
+    for (let i = 0; i < data.length; i += 4) {
+      const v = Math.random() * 255 | 0;
+      data[i] = data[i+1] = data[i+2] = v;
+      data[i+3] = Math.random() * 30 | 0;
+    }
+    grainCx.putImageData(grainImg, 0, 0);
+    requestAnimationFrame(drawGrainFrame);
+  }
+  function toggleGrain() {
+    grainOn = !grainOn;
+    if (grainOn) drawGrainFrame();
+  }
+  window.addEventListener('keydown', e => { if (e.key === 'g' || e.key === 'G') toggleGrain(); });
+  drawGrainFrame();
+
+  // ── Mic toggle ──────────────────────────────────────────────
+  const btn = document.getElementById('btn');
+  btn.addEventListener('click', async () => {
+    if (micActive) {
+      micActive = false; btn.style.opacity = '0.4';
+      micStream?.getTracks().forEach(t => t.stop());
+      audioCtx?.close();
+      micStream = audioCtx = analyser = timeDomain = null;
+      ampLevel = 0; return;
+    }
+    try {
+      micStream  = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      audioCtx   = new (window.AudioContext || window.webkitAudioContext)();
+      const src  = audioCtx.createMediaStreamSource(micStream);
+      analyser   = audioCtx.createAnalyser();
+      analyser.fftSize = 2048; analyser.smoothingTimeConstant = 0.5;
+      src.connect(analyser);
+      timeDomain = new Uint8Array(analyser.fftSize);
+      micActive  = true; btn.style.opacity = '';
+    } catch { /* permission denied */ }
+  });
+
+  // ── C-key modifier ──────────────────────────────────────────
+  let cHeld = false;
+  window.addEventListener('keyup', e => { if (e.isTrusted) window.parent?.postMessage({ type: 'childKeyup', key: e.key }, '*'); if (e.key==='c'||e.key==='C') cHeld=false; });
+
+  // ── VGA 16-color legend ─────────────────────────────────────
+  const POOL   = '.,:;+*#@0123456789';
+  const PRIMES = ['2','3','5','7','11','13','17','19','/'];
+  const rc = () => POOL[Math.floor(Math.random() * POOL.length)];
+  const rb = () => String.fromCodePoint(0x2801 + Math.floor(Math.random() * 255));
+  const rp = () => PRIMES[Math.floor(Math.random() * PRIMES.length)];
+  const VGA = [
+    '#000000','#0000AA','#00AA00','#00AAAA',
+    '#AA0000','#AA00AA','#AA5500','#AAAAAA',
+    '#555555','#5555FF','#55FF55','#55FFFF',
+    '#FF5555','#FF55FF','#FFFF55','#FFFFFF',
+  ];
+  const legendEl    = document.getElementById('legend');
+  const opsEl       = document.getElementById('ops');
+  const zkoEl       = document.getElementById('zko');
+  const legendSpans = VGA.map(col => {
+    const s = document.createElement('span');
+    s.style.color = col; s.style.cursor = 'pointer'; s.textContent = rc();
+    s.addEventListener('click', () => {
+      if (cHeld) {
+        btn.style.color   = col; opsEl.style.color = col; zkoEl.style.color = col;
+        document.getElementById('ckey').style.color  = col;
+        document.getElementById('pgkeys').style.color = col;
+        document.getElementById('speed').style.color  = col;
+      } else { lineColor = col; colorIdx = VGA.indexOf(col); }
+    });
+    legendEl.appendChild(s); return s;
+  });
+
+  zkoEl.textContent = rc()+rc()+rc()+rc();
+  btn.textContent   = rb();
+  opsEl.textContent = rp()+rp();
+
+  let cycleMs = 140;
+  function cycleFn() {
+    btn.textContent = rb(); opsEl.textContent = rp()+rp();
+    zkoEl.textContent = rc()+rc()+rc()+rc(); legendSpans.forEach(s => s.textContent = rc());
+  }
+  let cycleId = setInterval(cycleFn, cycleMs);
+
+  function updateSpeedUI() {
+    const sl = document.getElementById('slower');
+    const fa = document.getElementById('faster');
+    sl.style.opacity = cycleMs >= 560 ? '0.4' : '1'; sl.style.pointerEvents = cycleMs >= 560 ? 'none' : '';
+    fa.style.opacity = cycleMs <= 140 ? '0.4' : '1'; fa.style.pointerEvents = cycleMs <= 140 ? 'none' : '';
+  }
+  updateSpeedUI();
+
+  document.getElementById('slower').addEventListener('click', () => {
+    cycleMs = Math.min(560, cycleMs + 140);
+    clearInterval(cycleId); cycleId = setInterval(cycleFn, cycleMs); updateSpeedUI();
+  });
+  document.getElementById('faster').addEventListener('click', () => {
+    cycleMs = Math.max(140, cycleMs - 140);
+    clearInterval(cycleId); cycleId = setInterval(cycleFn, cycleMs); updateSpeedUI();
+  });
+
+  window.addEventListener('keydown', e => {
+    if (e.isTrusted) window.parent?.postMessage({ type: 'childKey', key: e.key, shiftKey: !!e.shiftKey }, '*');
+    if (e.key === 'c' || e.key === 'C') { cHeld = true; return; }
+    if      (e.key === 'ArrowLeft'  && !cHeld) {
+      cycleMs = Math.min(560, cycleMs + 140);
+      clearInterval(cycleId); cycleId = setInterval(cycleFn, cycleMs); updateSpeedUI();
+    } else if (e.key === 'ArrowRight' && !cHeld) {
+      cycleMs = Math.max(140, cycleMs - 140);
+      clearInterval(cycleId); cycleId = setInterval(cycleFn, cycleMs); updateSpeedUI();
+    } else if (!cHeld && e.key === 'ArrowUp') {
+      colorIdx = (colorIdx - 1 + VGA.length) % VGA.length; lineColor = VGA[colorIdx];
+    } else if (!cHeld && e.key === 'ArrowDown') {
+      colorIdx = (colorIdx + 1) % VGA.length; lineColor = VGA[colorIdx];
+    } else if (cHeld && e.key === 'ArrowUp') {
+      uiColorIdx = (uiColorIdx - 1 + VGA.length) % VGA.length;
+      btn.style.color   = VGA[uiColorIdx]; opsEl.style.color = VGA[uiColorIdx]; zkoEl.style.color = VGA[uiColorIdx];
+      document.getElementById('ckey').style.color   = VGA[uiColorIdx];
+      document.getElementById('pgkeys').style.color = VGA[uiColorIdx];
+      document.getElementById('speed').style.color  = VGA[uiColorIdx];
+    } else if (cHeld && e.key === 'ArrowDown') {
+      uiColorIdx = (uiColorIdx + 1) % VGA.length;
+      btn.style.color   = VGA[uiColorIdx]; opsEl.style.color = VGA[uiColorIdx]; zkoEl.style.color = VGA[uiColorIdx];
+      document.getElementById('ckey').style.color   = VGA[uiColorIdx];
+      document.getElementById('pgkeys').style.color = VGA[uiColorIdx];
+      document.getElementById('speed').style.color  = VGA[uiColorIdx];
+    }
+  });
+
+  // ── postMessage bridge (keyboard from parent window) ──────────
+  window.addEventListener('message', e => {
+    if (e.data?.type === 'key') {
+      if (e.data.cHeld !== undefined) cHeld = !!e.data.cHeld;
+      window.dispatchEvent(new KeyboardEvent('keydown', {key:e.data.key, shiftKey:!!e.data.shiftKey, bubbles:true}));
+    }
+    else if (e.data?.type === 'keyup')
+      window.dispatchEvent(new KeyboardEvent('keyup', {key:e.data.key, bubbles:true}));
+    else if (e.data?.type === 'audioData')
+      parentAudio = e.data;
+  });
+
+  // Randomize colors on load
+  (function() {
+    const GOOD = [6,11,13,14,15];
+    colorIdx  = GOOD[Math.floor(Math.random() * GOOD.length)];
+    lineColor = VGA[colorIdx];
+    const _uiPool = GOOD.filter(i => i !== colorIdx);
+    uiColorIdx = _uiPool[Math.floor(Math.random() * _uiPool.length)];
+    const _uc = VGA[uiColorIdx];
+    if (btn)   btn.style.color   = _uc;
+    if (opsEl) opsEl.style.color = _uc;
+    if (zkoEl) zkoEl.style.color = _uc;
+    const _ck = document.getElementById('ckey');
+    const _tk = document.getElementById('pgkeys');
+    const _sp = document.getElementById('speed');
+    if (_ck) _ck.style.color = _uc;
+    if (_tk) _tk.style.color = _uc;
+    if (_sp) _sp.style.color = _uc;
+  })();
+</script>
+</body>
+</html>

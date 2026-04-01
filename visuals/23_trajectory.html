@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Trajectory</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #000;
+    height: 100vh;
+    overflow: hidden;
+    font-family: 'Share Tech Mono', monospace;
+  }
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: radial-gradient(ellipse at center, #0a0f00 0%, #000 70%);
+    z-index: 0;
+  }
+  #canvas { position: fixed; inset: 0; z-index: 1; display: block; }
+  .scanline {
+    position: fixed; inset: 0;
+    background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.08) 2px, rgba(0,0,0,0.08) 4px);
+    pointer-events: none; z-index: 2;
+  }
+  .vignette {
+    position: fixed; inset: 0;
+    background: radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.7) 100%);
+    pointer-events: none; z-index: 3;
+  }
+  #btn {
+    all: unset;
+    position: fixed; top: 20px; left: 24px; z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px; color: #39ff14; letter-spacing: 3px; cursor: pointer;
+  }
+  #tgkeys {
+    position: fixed; top: 54px; left: 24px; z-index: 4;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 14px; letter-spacing: 3px; color: #39ff14;
+    display: flex; gap: 1ch;
+  }
+  #tkey { cursor: pointer; }
+  #grain-cv {
+    position: fixed; inset: 0; width: 100%; height: 100%;
+    pointer-events: none; z-index: 5;
+  }
+  #legend {
+    position: fixed; top: 20px; right: 24px; z-index: 4;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px;
+    display: grid; grid-template-columns: repeat(8, 1em);
+    gap: 4px 6px; line-height: 1.4; text-align: center;
+  }
+  #zko {
+    position: fixed; bottom: 20px; left: 24px; z-index: 4;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px;
+    letter-spacing: 3px; color: #39ff14; text-decoration: none; cursor: pointer;
+  }
+  #ops {
+    position: fixed; bottom: 20px; right: 24px; z-index: 4;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px;
+    letter-spacing: 3px; color: #39ff14;
+  }
+  #speed {
+    position: fixed; bottom: 40px; right: 24px; z-index: 4;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px;
+    letter-spacing: 3px; color: #39ff14; user-select: none;
+  }
+  #speed span { cursor: pointer; }
+  #ckey {
+    position: fixed; top: 68px; right: 24px; width: 1em; z-index: 4;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px;
+    line-height: 1.4; color: #39ff14; text-align: center; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div class="scanline"></div>
+<div class="vignette"></div>
+<button id="btn"></button>
+<div id="tgkeys"><div id="tkey">T</div></div>
+<canvas id="grain-cv"></canvas>
+<div id="legend"></div>
+<div id="ops"></div>
+<div id="speed"><span id="slower">&lt;</span> <span id="faster">&gt;</span></div>
+<div id="ckey">C</div>
+<a id="zko" href="https://zko.io" target="_blank" rel="noopener"></a>
+<canvas id="canvas"></canvas>
+<script>
+  const canvas = document.getElementById('canvas');
+  const ctx    = canvas.getContext('2d');
+  let W, H;
+
+  function resize() {
+    W = canvas.width  = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  // ── State ─────────────────────────────────────────────────
+  let lineColor   = '#39ff14';
+  let colorIdx    = 10;
+  let uiColorIdx  = 10;
+  let ampLevel    = 0;
+  let ampWasHigh  = false;
+  let parentAudio = null;
+  let micActive   = false, micStream = null, audioCtx = null, analyser = null, timeDomain = null;
+  let phase       = 0;
+  let cycleMs     = 280;
+  let crossAngle       = 0;
+  let crossTargetAngle = 0;
+  setInterval(() => { crossTargetAngle -= Math.PI / 4; }, 500);
+
+  // ── 3D Perspective constants ──────────────────────────────
+  const FOCAL     = 400;
+  const NEAR_CLIP = 28;
+  const MAX_DEPTH = 900;
+  const N_PLANES  = 14;
+  const SPACING   = MAX_DEPTH / N_PLANES;
+  const PLANE_W   = 52;   // world-space half-width
+  const PLANE_H   = 40;   // world-space half-height
+
+  // ── Tunnel paths: [x_offset, y_offset] at parameter t (0=near, 1=far)
+  // All converge to [0,0] at t=1 (vanishing point at screen center).
+  // t = z_rel / MAX_DEPTH so the path is static in the frame.
+  // W/40 world units at visible z ≈ 60 projects to ~W/6 screen displacement.
+  const TUNNELS = [
+    t => [-(1-t) * W/40, 0],                                        // left, level
+    t => [ (1-t) * W/40, 0],                                        // right, level
+    t => [-(1-t) * W/40, -(1-t) * H/35],                            // lower-left
+    t => [ (1-t) * W/40,  (1-t) * H/35],                            // upper-right
+    t => [-(1-t) * W/38,  Math.sin(t * Math.PI) * H/55],            // left, gentle arc
+    t => [ (1-t) * W/38, -Math.sin(t * Math.PI) * H/55],            // right, gentle arc
+    t => [-(1-t) * W/42, (1-t*t) * H/50 - H/50],                   // left, slight bank down
+    t => [ (1-t) * W/42, -(1-t*t) * H/50 + H/50],                  // right, slight bank up
+  ];
+  let tunnelIdx = 0;
+
+  function project(x, y, z) {
+    const s = FOCAL / z;
+    return [W / 2 + x * s, H / 2 + y * s, s];
+  }
+
+  function triggerTunnel() {
+    tunnelIdx = (tunnelIdx + 1) % TUNNELS.length;
+  }
+
+  // ── Render ────────────────────────────────────────────────
+  const GLOW = [
+    { blur: 14, alpha: 0.22, width: 3.0 },
+    { blur: 4,  alpha: 0.50, width: 1.5 },
+    { blur: 0,  alpha: 0.90, width: 0.8 },
+  ];
+
+  function frame() {
+    if (micActive || parentAudio) {
+      let rms;
+      if (micActive) {
+        analyser.getByteTimeDomainData(timeDomain);
+        let sq = 0;
+        for (let i = 0; i < timeDomain.length; i++) {
+          const d = timeDomain[i] / 255 - 0.5; sq += d * d;
+        }
+        rms = Math.sqrt(sq / timeDomain.length);
+      } else { rms = parentAudio.rms; }
+      ampLevel += (rms * 5 - ampLevel) * 0.12;
+      if (rms > 0.05 && !ampWasHigh) { triggerTunnel(); ampWasHigh = true; }
+      else if (rms < 0.03) ampWasHigh = false;
+    } else {
+      ampLevel *= 0.93;
+    }
+
+    crossAngle += (crossTargetAngle - crossAngle) * 0.04;
+    const flySpeed = 0.8 * (140 / cycleMs) * (1 + ampLevel * 3.5);
+    phase = (phase + flySpeed) % MAX_DEPTH;
+    const camera_z = phase;
+
+    ctx.clearRect(0, 0, W, H);
+    ctx.strokeStyle = lineColor;
+    ctx.shadowColor = lineColor;
+
+    // Faint horizontal scanlines
+    ctx.shadowBlur  = 0;
+    ctx.lineWidth   = 0.5;
+    ctx.globalAlpha = 0.048 + ampLevel * 0.015;
+    for (let y = 0; y <= H; y += 18) {
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+    }
+
+    // Speed-burst radial lines on loud audio
+    if (ampLevel > 0.1) {
+      ctx.globalAlpha    = Math.min(ampLevel * 0.6, 0.22);
+      ctx.lineWidth      = 0.8;
+      ctx.setLineDash([6, 14]);
+      ctx.lineDashOffset = -phase * 0.06;
+      for (let i = 0; i < 20; i++) {
+        const a = (i / 20) * Math.PI * 2;
+        ctx.beginPath();
+        ctx.moveTo(W / 2, H / 2);
+        ctx.lineTo(W / 2 + Math.cos(a) * Math.max(W, H), H / 2 + Math.sin(a) * Math.max(W, H));
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+      ctx.lineDashOffset = 0;
+    }
+
+    // Build plane list sorted far-to-near
+    const planes = [];
+    for (let i = 0; i < N_PLANES; i++) {
+      const world_z = i * SPACING;
+      let z_rel = ((world_z - camera_z) % MAX_DEPTH + MAX_DEPTH) % MAX_DEPTH;
+      if (z_rel < NEAR_CLIP) continue;
+      const t_curve = z_rel / MAX_DEPTH;
+      const near_a  = Math.min(1, (z_rel - NEAR_CLIP) / 60);
+      const far_a   = Math.pow(Math.max(0, 1 - z_rel / MAX_DEPTH), 0.55);
+      const alpha   = near_a * far_a;
+      if (alpha > 0.01) planes.push({ z_rel, t_curve, alpha });
+    }
+    planes.sort((a, b) => b.z_rel - a.z_rel);
+
+    for (const { z_rel, t_curve, alpha } of planes) {
+      const [xOff, yOff] = TUNNELS[tunnelIdx](t_curve);
+      const [sx, sy, scale] = project(xOff, yOff, z_rel);
+      const pw = PLANE_W * scale;
+      const ph = PLANE_H * scale;
+      const corners = [
+        [sx + pw, sy - ph], [sx - pw, sy - ph],
+        [sx - pw, sy + ph], [sx + pw, sy + ph],
+      ];
+      const a = alpha * (0.75 + ampLevel * 0.25);
+      for (const { blur, alpha: pa, width } of GLOW) {
+        ctx.beginPath();
+        ctx.moveTo(corners[0][0], corners[0][1]);
+        for (let j = 1; j < 4; j++) ctx.lineTo(corners[j][0], corners[j][1]);
+        ctx.closePath();
+        ctx.shadowBlur  = blur;
+        ctx.lineWidth   = width;
+        ctx.globalAlpha = a * pa;
+        ctx.stroke();
+      }
+    }
+
+    // Projected path trace
+    for (const { blur, alpha, width } of GLOW) {
+      ctx.beginPath();
+      let started = false;
+      for (let i = 1; i <= 120; i++) {
+        const z_rel = (i / 120) * MAX_DEPTH;
+        if (z_rel < NEAR_CLIP) continue;
+        const t_curve = z_rel / MAX_DEPTH;
+        const [xOff, yOff] = TUNNELS[tunnelIdx](t_curve);
+        const [sx, sy] = project(xOff, yOff, z_rel);
+        if (!started) { ctx.moveTo(sx, sy); started = true; }
+        else ctx.lineTo(sx, sy);
+      }
+      ctx.shadowBlur  = blur;
+      ctx.lineWidth   = width * 0.45;
+      ctx.globalAlpha = alpha * 0.28;
+      ctx.stroke();
+    }
+
+    // Cross at curve entry point — match exact first visible path segment
+    let z_cross = NEAR_CLIP + 5;
+    for (let i = 1; i <= 120; i++) {
+      const z_test = (i / 120) * MAX_DEPTH;
+      if (z_test >= NEAR_CLIP) { z_cross = z_test; break; }
+    }
+    const t_cross  = z_cross / MAX_DEPTH;
+    const [cxOff, cyOff] = TUNNELS[tunnelIdx](t_cross);
+    const [csx, csy] = project(cxOff, cyOff, z_cross);
+    const CROSS_R  = 18;
+    for (const { blur, alpha, width } of GLOW) {
+      ctx.shadowBlur  = blur;
+      ctx.lineWidth   = width;
+      ctx.globalAlpha = alpha;
+      ctx.save();
+      ctx.translate(csx, csy);
+      ctx.rotate(crossAngle);
+      ctx.beginPath();
+      ctx.moveTo(-CROSS_R, 0); ctx.lineTo(CROSS_R, 0);
+      ctx.moveTo(0, -CROSS_R); ctx.lineTo(0, CROSS_R);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    ctx.globalAlpha = 1;
+    ctx.shadowBlur  = 0;
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // ── Grain ─────────────────────────────────────────────────
+  const grainEl = document.getElementById('grain-cv');
+  const grainCx = grainEl.getContext('2d');
+  let grainImg  = null;
+  function drawGrainFrame() {
+    const gW = Math.ceil(window.innerWidth  / 2);
+    const gH = Math.ceil(window.innerHeight / 2);
+    if (grainEl.width !== gW || grainEl.height !== gH) {
+      grainEl.width = gW; grainEl.height = gH;
+      grainImg = grainCx.createImageData(gW, gH);
+    }
+    const data = grainImg.data;
+    for (let i = 0; i < data.length; i += 4) {
+      const v = Math.random() * 255 | 0;
+      data[i] = data[i+1] = data[i+2] = v;
+      data[i+3] = Math.random() * 30 | 0;
+    }
+    grainCx.putImageData(grainImg, 0, 0);
+    requestAnimationFrame(drawGrainFrame);
+  }
+  drawGrainFrame();
+
+  // ── Click / T trigger ─────────────────────────────────────
+  canvas.addEventListener('click', triggerTunnel);
+  document.getElementById('tkey').addEventListener('click', triggerTunnel);
+
+  // ── Mic toggle ────────────────────────────────────────────
+  const btn = document.getElementById('btn');
+  btn.style.opacity = '0.4';
+  btn.addEventListener('click', async () => {
+    if (micActive) {
+      micActive = false;
+      btn.style.opacity = '0.4';
+      micStream?.getTracks().forEach(t => t.stop());
+      audioCtx?.close();
+      micStream = audioCtx = analyser = timeDomain = null;
+      ampLevel = 0;
+      return;
+    }
+    try {
+      micStream  = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      audioCtx   = new (window.AudioContext || window.webkitAudioContext)();
+      const src  = audioCtx.createMediaStreamSource(micStream);
+      analyser   = audioCtx.createAnalyser();
+      analyser.fftSize = 2048;
+      analyser.smoothingTimeConstant = 0.5;
+      src.connect(analyser);
+      timeDomain = new Uint8Array(analyser.fftSize);
+      micActive  = true;
+      btn.style.opacity = '';
+    } catch {}
+  });
+
+  // ── Speed < > ─────────────────────────────────────────────
+  function updateSpeedUI() {
+    const sl = document.getElementById('slower');
+    const fa = document.getElementById('faster');
+    sl.style.opacity       = cycleMs >= 560 ? '0.4' : '1';
+    sl.style.pointerEvents = cycleMs >= 560 ? 'none' : '';
+    fa.style.opacity       = cycleMs <= 140 ? '0.4' : '1';
+    fa.style.pointerEvents = cycleMs <= 140 ? 'none' : '';
+  }
+  updateSpeedUI();
+  document.getElementById('slower').addEventListener('click', () => {
+    cycleMs = Math.min(560, cycleMs + 140);
+    clearInterval(cycleId); cycleId = setInterval(cycleFn, cycleMs);
+    updateSpeedUI();
+  });
+  document.getElementById('faster').addEventListener('click', () => {
+    cycleMs = Math.max(140, cycleMs - 140);
+    clearInterval(cycleId); cycleId = setInterval(cycleFn, cycleMs);
+    updateSpeedUI();
+  });
+
+  // ── VGA legend ────────────────────────────────────────────
+  const POOL   = '.,:;+*#@0123456789';
+  const PRIMES = ['2','3','5','7','11','13','17','19','/'];
+  const rc = () => POOL[Math.floor(Math.random() * POOL.length)];
+  const rb = () => String.fromCodePoint(0x2801 + Math.floor(Math.random() * 255));
+  const rp = () => PRIMES[Math.floor(Math.random() * PRIMES.length)];
+  const VGA = [
+    '#000000','#0000AA','#00AA00','#00AAAA',
+    '#AA0000','#AA00AA','#AA5500','#AAAAAA',
+    '#555555','#5555FF','#55FF55','#55FFFF',
+    '#FF5555','#FF55FF','#FFFF55','#FFFFFF',
+  ];
+
+  let cHeld = false;
+  const legendEl = document.getElementById('legend');
+  const opsEl    = document.getElementById('ops');
+  const zkoEl    = document.getElementById('zko');
+
+  const legendSpans = VGA.map(col => {
+    const s = document.createElement('span');
+    s.style.color  = col;
+    s.style.cursor = 'pointer';
+    s.textContent  = rc();
+    s.addEventListener('click', () => {
+      if (cHeld) {
+        btn.style.color  = col; opsEl.style.color = col; zkoEl.style.color = col;
+        document.getElementById('ckey').style.color   = col;
+        document.getElementById('tgkeys').style.color = col;
+        document.getElementById('speed').style.color  = col;
+      } else {
+        lineColor = col; colorIdx = VGA.indexOf(col);
+      }
+    });
+    legendEl.appendChild(s);
+    return s;
+  });
+
+  zkoEl.textContent = rc() + rc() + rc() + rc();
+  btn.textContent   = rb();
+  opsEl.textContent = rp() + rp();
+
+  function cycleFn() {
+    opsEl.textContent = rp() + rp();
+    zkoEl.textContent = rc() + rc() + rc() + rc();
+    legendSpans.forEach(s => s.textContent = rc());
+  }
+  let cycleId = setInterval(cycleFn, cycleMs);
+  setInterval(() => { btn.textContent = rb(); }, 140);
+
+  // ── Keyboard ──────────────────────────────────────────────
+  window.addEventListener('keydown', e => {
+    if (e.isTrusted) window.parent?.postMessage({ type: 'childKey', key: e.key, shiftKey: !!e.shiftKey }, '*');
+    if (e.key === 't' || e.key === 'T') {
+      triggerTunnel();
+    } else if (e.key === 'ArrowLeft' && !cHeld) {
+      cycleMs = Math.min(560, cycleMs + 140);
+      clearInterval(cycleId); cycleId = setInterval(cycleFn, cycleMs); updateSpeedUI();
+    } else if (e.key === 'ArrowRight' && !cHeld) {
+      cycleMs = Math.max(140, cycleMs - 140);
+      clearInterval(cycleId); cycleId = setInterval(cycleFn, cycleMs); updateSpeedUI();
+    } else if (!cHeld && e.key === 'ArrowUp') {
+      colorIdx = (colorIdx - 1 + VGA.length) % VGA.length; lineColor = VGA[colorIdx];
+    } else if (!cHeld && e.key === 'ArrowDown') {
+      colorIdx = (colorIdx + 1) % VGA.length; lineColor = VGA[colorIdx];
+    } else if (cHeld && e.key === 'ArrowUp') {
+      uiColorIdx = (uiColorIdx - 1 + VGA.length) % VGA.length;
+      btn.style.color  = VGA[uiColorIdx]; opsEl.style.color = VGA[uiColorIdx]; zkoEl.style.color = VGA[uiColorIdx];
+      document.getElementById('ckey').style.color   = VGA[uiColorIdx];
+      document.getElementById('tgkeys').style.color = VGA[uiColorIdx];
+      document.getElementById('speed').style.color  = VGA[uiColorIdx];
+    } else if (cHeld && e.key === 'ArrowDown') {
+      uiColorIdx = (uiColorIdx + 1) % VGA.length;
+      btn.style.color  = VGA[uiColorIdx]; opsEl.style.color = VGA[uiColorIdx]; zkoEl.style.color = VGA[uiColorIdx];
+      document.getElementById('ckey').style.color   = VGA[uiColorIdx];
+      document.getElementById('tgkeys').style.color = VGA[uiColorIdx];
+      document.getElementById('speed').style.color  = VGA[uiColorIdx];
+    } else if (e.key === 'c' || e.key === 'C') {
+      cHeld = true;
+    }
+  });
+
+  window.addEventListener('keyup', e => {
+    if (e.isTrusted) window.parent?.postMessage({ type: 'childKeyup', key: e.key }, '*');
+    if (e.key === 'c' || e.key === 'C') cHeld = false;
+  });
+
+  // ── postMessage bridge ────────────────────────────────────
+  window.addEventListener('message', e => {
+    if (e.data?.type === 'key') {
+      if (e.data.cHeld !== undefined) cHeld = !!e.data.cHeld;
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: e.data.key, shiftKey: !!e.data.shiftKey, bubbles: true }));
+    }
+    else if (e.data?.type === 'keyup')
+      window.dispatchEvent(new KeyboardEvent('keyup', { key: e.data.key, bubbles: true }));
+    else if (e.data?.type === 'audioData')
+      parentAudio = e.data;
+  });
+
+  // Randomize colors on load
+  (function() {
+    const GOOD = [6,11,13,14,15];
+    colorIdx  = GOOD[Math.floor(Math.random() * GOOD.length)];
+    lineColor = VGA[colorIdx];
+    const _uiPool = GOOD.filter(i => i !== colorIdx);
+    uiColorIdx = _uiPool[Math.floor(Math.random() * _uiPool.length)];
+    const _uc = VGA[uiColorIdx];
+    if (btn)   btn.style.color   = _uc;
+    if (opsEl) opsEl.style.color = _uc;
+    if (zkoEl) zkoEl.style.color = _uc;
+    const _ck = document.getElementById('ckey');
+    const _tk = document.getElementById('tgkeys');
+    const _sp = document.getElementById('speed');
+    if (_ck) _ck.style.color = _uc;
+    if (_tk) _tk.style.color = _uc;
+    if (_sp) _sp.style.color = _uc;
+  })();
+</script>
+</body>
+</html>

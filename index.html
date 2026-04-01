@@ -1,0 +1,882 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>AA01</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; user-select: none; -webkit-user-select: none; }
+
+    #grid {
+      width: 100%;
+      height: calc(100% - 51px);
+      display: flex;
+      flex-direction: column;
+    }
+
+    #statusbar {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 51px;
+      z-index: 50;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 24px;
+      border-top: 1px solid rgba(57, 255, 20, 0.08);
+      transition: border-top-color 0.6s;
+    }
+
+    #idle-s {
+      font-family: 'Share Tech Mono', monospace;
+      font-size: 14px;
+      color: #39ff14;
+      text-shadow: 0 0 8px #39ff14, 0 0 20px #39ff1480;
+      pointer-events: none;
+      user-select: none;
+      animation: blink 1s step-start infinite;
+    }
+
+    #hbtn, #fbtn, #micbtn, #abtn, .lbtn {
+      all: unset;
+      font-family: 'Share Tech Mono', monospace;
+      font-size: 14px;
+      color: #39ff14;
+      text-shadow: 0 0 8px #39ff14, 0 0 20px #39ff1480;
+      letter-spacing: 3px;
+      cursor: pointer;
+    }
+    #hbtn:hover, #fbtn:hover, #micbtn:hover, #abtn:hover, .lbtn:hover { opacity: 0.7; }
+    .lbtn.selected { text-decoration: underline; text-underline-offset: 4px; opacity: 1; }
+    #statusbar-right { display: flex; gap: 20px; align-items: center; transition: opacity 0.6s; }
+    #statusbar.idle { border-top-color: transparent !important; }
+    #statusbar.idle #statusbar-right { opacity: 0; pointer-events: none; }
+    #statusbar.idle #hbtn { opacity: 1; pointer-events: auto; }
+
+    /* Each row is its own independent flex container */
+    .row-wrap {
+      display: flex;
+      flex-direction: row;
+      overflow: hidden;
+      min-height: 0;
+    }
+
+    .pane {
+      overflow: hidden;
+      position: relative;
+      background: #000;
+      min-width: 0;
+      min-height: 0;
+    }
+
+    .pane iframe {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      border: none;
+    }
+
+    .focus-cover {
+      position: absolute;
+      inset: 0;
+      z-index: 15;
+      cursor: pointer;
+    }
+
+    @keyframes blink {
+      0%, 49% { opacity: 1; }
+      50%, 100% { opacity: 0; }
+    }
+
+    .focus-s {
+      display: none;
+      position: absolute;
+      top: 20px;
+      left: 76px;
+      z-index: 16;
+      font-family: 'Share Tech Mono', monospace;
+      font-size: 14px;
+      color: #39ff14;
+      text-shadow: 0 0 8px #39ff14, 0 0 20px #39ff1480;
+      pointer-events: none;
+      user-select: none;
+      animation: blink 1s step-start infinite;
+    }
+
+    /* flex: 0 0 4px keeps handles at fixed size */
+    .vdrag {
+      flex: 0 0 4px;
+      background: #0a0a0a;
+      cursor: col-resize;
+      z-index: 20;
+      transition: background 0.15s;
+    }
+    .vdrag:hover, .vdrag.on { background: rgba(57, 255, 20, 0.35); }
+
+    .hdrag {
+      flex: 0 0 4px;
+      background: #0a0a0a;
+      cursor: row-resize;
+      z-index: 20;
+      transition: background 0.15s;
+    }
+    .hdrag:hover, .hdrag.on { background: rgba(57, 255, 20, 0.35); }
+
+    #glass {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 999;
+    }
+  </style>
+</head>
+<body>
+  <div id="grid"></div>
+  <div id="glass"></div>
+  <div id="statusbar">
+    <div id="idle-s">█</div>
+    <div id="statusbar-right">
+      <button id="abtn"   tabindex="-1">A</button>
+      <button id="micbtn" tabindex="-1"></button>
+      <button class="lbtn" tabindex="-1" data-layout="0">1</button>
+      <button class="lbtn" tabindex="-1" data-layout="1">2</button>
+      <button class="lbtn" tabindex="-1" data-layout="2">3</button>
+      <button class="lbtn" tabindex="-1" data-layout="3">4</button>
+      <button class="lbtn" tabindex="-1" data-layout="4">5</button>
+      <button class="lbtn" tabindex="-1" data-layout="5">6</button>
+      <button id="fbtn" tabindex="-1">F</button>
+      <button id="hbtn" tabindex="-1">H</button>
+    </div>
+  </div>
+
+  <script>
+    const SRCS  = ['01_blob','02_cube','03_donut','04_field','05_grid','06_halo','07_mesh','08_normal','09_octahedron','10_planes','11_pyramid','12_quaternion','13_shimmer','14_topo','15_vibe','16_wave','17_nodes','18_glitch','19_lissajous','20_automata','21_lorenz','22_fourier','23_trajectory','24_ripple','25_helmholtz','26_rings','27_wormhole','28_superellipse','29_blackhole','30_intersect','31_voronoi','32_julia'];
+    const MODES = [
+      { cols: 1, rows: 1 },  // key 1
+      { cols: 2, rows: 1 },  // key 2
+      { cols: 1, rows: 2 },  // key 3
+      { cols: 2, rows: 2 },  // key 4
+      { cols: 3, rows: 2 },  // key 5
+      { cols: 4, rows: 2 },  // key 6
+    ];
+
+    const gridEl = document.getElementById('grid');
+    const glass  = document.getElementById('glass');
+    const VGAP   = 4;
+    const HGAP   = 4;
+    const MINCOL = 80;
+    const MINROW = 60;
+
+    // Per-row independent column fractions + row height fractions
+    let rowFrs     = [];
+    let rowColFrs  = [];   // rowColFrs[r] = [fr, fr, ...]
+    let rowWrapEls = [];   // rowWrapEls[r] = .row-wrap element
+    let rowPaneEls = [];   // rowPaneEls[r][c] = .pane element
+
+    let focusedPane   = null;
+    let focusedIframe = null;
+    let firstPane     = null;
+    let helpVisible   = false;
+    let helpCycleId   = null;
+    let helpCHeld     = false;
+    let helpUiColorIdx   = 10;
+    let _helpApplyText   = null;
+
+    window.addEventListener('keydown', e => { if (e.key==='c'||e.key==='C') helpCHeld=true;  });
+    window.addEventListener('keyup',   e => { if (e.key==='c'||e.key==='C') helpCHeld=false; });
+
+    // ── Index UI color ────────────────────────────────────────────
+    let _idxColorStyle = null;
+    let _idxColor = '#39ff14';
+    function applyIndexColor(col) {
+      _idxColor = col;
+      const r = parseInt(col.slice(1,3),16);
+      const g = parseInt(col.slice(3,5),16);
+      const b = parseInt(col.slice(5,7),16);
+      const sh = `0 0 8px ${col}, 0 0 20px ${col}80`;
+      if (!_idxColorStyle) {
+        _idxColorStyle = document.createElement('style');
+        document.head.appendChild(_idxColorStyle);
+      }
+      _idxColorStyle.textContent = `
+        #idle-s { color:${col}!important; text-shadow:${sh}!important; }
+        #help-esc-label { color:${col}!important; text-shadow:${sh}!important; }
+        #hbtn,#fbtn,#micbtn,#abtn,.lbtn { color:${col}!important; text-shadow:${sh}!important; }
+        .lbtn.selected { color:${col}!important; }
+        .focus-s { color:${col}!important; text-shadow:${sh}!important; }
+        #statusbar { border-top-color:rgba(${r},${g},${b},0.08)!important; }
+        .vdrag:hover,.vdrag.on { background:rgba(${r},${g},${b},0.35)!important; }
+        .hdrag:hover,.hdrag.on { background:rgba(${r},${g},${b},0.35)!important; }
+      `;
+      if (switchPre) {
+        switchPre.style.color      = col;
+        switchPre.style.textShadow = `0 0 8px ${col},0 0 20px ${col}80`;
+      }
+    }
+
+    // ── Help overlay ──────────────────────────────────────────────
+    const VGA_COLORS = [
+      '#000000','#0000AA','#00AA00','#00AAAA',
+      '#AA0000','#AA00AA','#AA5500','#AAAAAA',
+      '#555555','#5555FF','#55FF55','#55FFFF',
+      '#FF5555','#FF55FF','#FFFF55','#FFFFFF',
+    ];
+    const HPOOL = '.,:;+*#@0123456789';
+    const hrc   = () => HPOOL[Math.floor(Math.random() * HPOOL.length)];
+    const hrb   = () => String.fromCodePoint(0x2801 + Math.floor(Math.random() * 255));
+
+    const HELP_LEFT = [
+      '  LAYOUT',
+      '  ' + '-'.repeat(28),
+      '  1          1 x 1',
+      '  2          1 x 2',
+      '  3          2 x 1',
+      '  4          2 x 2',
+      '  5          3 x 2',
+      '  6          4 x 2',
+      '  H          help',
+      '  F          fullscreen',
+      '',
+      '',
+      '  VISUALIZATIONS',
+      '  ' + '-'.repeat(28),
+      '  [btn]          mic toggle',
+      '  < >        cycle speed',
+      '  ↑↓         cycle viz color',
+      '  C+↑↓       cycle ui color',
+      '  T          trigger',
+    ];
+
+    const HELP_RIGHT_TOP = [
+      '  FOCUS',
+      '  ' + '-'.repeat(28),
+      '  click      focus window',
+      '  space      cycle focus',
+      '  shift+↑↓   cycle viz',
+    ];
+    const HELP_SHIFT = [
+      '  shift+B    01_blob',
+      '  shift+C    02_cube',
+      '  shift+D    03_donut',
+      '  shift+F    04_field',
+      '  shift+G    05_grid',
+      '  shift+H    06_halo',
+      '  shift+M    07_mesh',
+      '  shift+N    08_normal',
+      '  shift+O    09_octahedron',
+      '  shift+Z    10_planes',
+      '  shift+P    11_pyramid',
+      '  shift+Q    12_quaternion',
+      '  shift+S    13_shimmer',
+      '  shift+T    14_topo',
+      '  shift+V    15_vibe',
+      '  shift+W    16_wave',
+      '  shift+X    17_nodes',
+      '  shift+L    18_glitch',
+      '  shift+I    19_lissajous',
+      '  shift+U    20_automata',
+      '  shift+E    21_lorenz',
+      '  shift+Y    22_fourier',
+      '  shift+J    23_trajectory',
+      '  shift+R    24_ripple',
+      '  shift+K    25_helmholtz',
+      '  shift+A    26_rings',
+      '  shift+0    27_wormhole',
+      '  shift+9    28_superellipse',
+      '  shift+8    29_blackhole',
+      '  shift+7    30_intersect',
+      '  shift+6    31_voronoi',
+      '  shift+5    32_julia',
+    ];
+
+    function showHelp() {
+      if (helpVisible) return;
+      helpVisible = true;
+
+      const ov = document.createElement('div');
+      ov.id = 'help-ov';
+      Object.assign(ov.style, {
+        position:'fixed', inset:'0', zIndex:'9999', background:'rgba(0,0,0,0.88)',
+        overflow:'hidden', display:'flex', alignItems:'center', justifyContent:'center',
+      });
+
+      const sl = document.createElement('div');
+      Object.assign(sl.style, {
+        position:'absolute', inset:'0', pointerEvents:'none', zIndex:'1',
+        background:'repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.08) 2px,rgba(0,0,0,0.08) 4px)',
+      });
+      ov.appendChild(sl);
+
+      const vg = document.createElement('div');
+      Object.assign(vg.style, {
+        position:'absolute', inset:'0', pointerEvents:'none', zIndex:'2',
+        background:'radial-gradient(ellipse at center,transparent 50%,rgba(0,0,0,0.7) 100%)',
+      });
+      ov.appendChild(vg);
+
+      const _hRect = document.getElementById('hbtn').getBoundingClientRect();
+      const escLabel = document.createElement('div');
+      escLabel.id = 'help-esc-label';
+      escLabel.textContent = 'SPACE / H';
+      Object.assign(escLabel.style, {
+        position:'fixed',
+        right: (window.innerWidth - _hRect.right) + 'px',
+        top:   _hRect.top + 'px',
+        zIndex:'9999', userSelect:'none', cursor:'pointer',
+        fontFamily:"'Share Tech Mono',monospace", fontSize:'14px',
+        letterSpacing:'3px', color:_idxColor,
+        textShadow:`0 0 8px ${_idxColor},0 0 20px ${_idxColor}80`,
+      });
+      escLabel.addEventListener('click', () => hideHelp());
+      ov.appendChild(escLabel);
+
+      const cols = document.createElement('div');
+      Object.assign(cols.style, {
+        position:'relative', zIndex:'3',
+        display:'flex', gap:'80px', alignItems:'flex-start',
+      });
+
+      const preStyle = {
+        fontFamily:"'Share Tech Mono',monospace", fontSize:'14px',
+        lineHeight:'1.6', letterSpacing:'2px', whiteSpace:'pre', userSelect:'none',
+        color:_idxColor, textShadow:`0 0 8px ${_idxColor},0 0 20px ${_idxColor}80`,
+      };
+
+      const preL = document.createElement('pre');
+      preL.id = 'help-pre';
+      Object.assign(preL.style, preStyle);
+      preL.innerHTML = HELP_LEFT.map(l =>
+        l.replace('[btn]', `<span id="help-btn-span">${hrb()}</span>`)
+      ).join('\n');
+      cols.appendChild(preL);
+
+      const half      = Math.ceil(HELP_SHIFT.length / 2);
+      const shiftCol1 = HELP_SHIFT.slice(0, half);
+      const shiftCol2 = HELP_SHIFT.slice(half);
+      const colW      = Math.max(...shiftCol1.map(s => s.length)) + 4;
+      const shiftText = shiftCol1.map((l, i) => l.padEnd(colW) + (shiftCol2[i] || '')).join('\n');
+
+      const preR = document.createElement('pre');
+      Object.assign(preR.style, preStyle);
+      preR.textContent = HELP_RIGHT_TOP.join('\n') + '\n\n' + shiftText;
+      cols.appendChild(preR);
+
+      ov.appendChild(cols);
+
+      const legWrap = document.createElement('div');
+      Object.assign(legWrap.style, {
+        position:'absolute', top:'20px', right:'24px', zIndex:'4',
+        display:'flex', flexDirection:'column', alignItems:'flex-end', gap:'0.4em',
+      });
+      ov.appendChild(legWrap);
+
+      const leg = document.createElement('div');
+      Object.assign(leg.style, {
+        fontFamily:"'Share Tech Mono',monospace", fontSize:'14px',
+        display:'grid', gridTemplateColumns:'repeat(8,1em)',
+        gap:'4px 6px', lineHeight:'1.4', textAlign:'center',
+      });
+      legWrap.appendChild(leg);
+
+      const applyAllColor = col => {
+        [preL, preR].forEach(p => {
+          p.style.color      = col;
+          p.style.textShadow = `0 0 8px ${col},0 0 20px ${col}80`;
+        });
+        applyIndexColor(col);
+      };
+
+      const legendSpans = VGA_COLORS.map(col => {
+        const s = document.createElement('span');
+        s.style.color  = col;
+        s.style.cursor = 'pointer';
+        s.textContent  = hrc();
+        s.addEventListener('click', () => { applyAllColor(col); });
+        leg.appendChild(s);
+        return s;
+      });
+
+      _helpApplyText = applyAllColor;
+      helpCycleId = setInterval(() => {
+        legendSpans.forEach(s => s.textContent = hrc());
+        const bs = document.getElementById('help-btn-span');
+        if (bs) bs.textContent = hrb();
+      }, 140);
+      document.body.appendChild(ov);
+    }
+
+    function hideHelp() {
+      if (!helpVisible) return;
+      helpVisible = false;
+      clearInterval(helpCycleId);
+      helpCycleId = null;
+      _helpApplyText = null;
+      const ov = document.getElementById('help-ov');
+      if (ov) ov.remove();
+    }
+
+    // ── Visual switcher overlay ────────────────────────────────────
+    let switchOpen = false;
+    let switchIdx  = 0;
+    let switchOv   = null;
+    let switchPre  = null;
+
+    function renderSwitchMenu() {
+      if (!switchPre) return;
+      switchPre.innerHTML = '';
+      const half = Math.ceil(SRCS.length / 2);
+      const colW = Math.max(...SRCS.slice(0, half).map(s => s.length)) + 6;
+      for (let i = 0; i < half; i++) {
+        const row = document.createElement('div');
+        row.style.display = 'flex';
+        // Column 1
+        const c1 = document.createElement('span');
+        c1.style.cursor = 'pointer';
+        c1.style.width = colW + 'ch';
+        c1.style.display = 'inline-block';
+        c1.textContent = (i === switchIdx ? '> ' : '  ') + SRCS[i];
+        c1.addEventListener('mouseenter', () => { switchIdx = i; renderSwitchMenu(); });
+        c1.addEventListener('click', () => { switchIdx = i; closeSwitchMenu(true); });
+        row.appendChild(c1);
+        // Column 2
+        const j = i + half;
+        if (j < SRCS.length) {
+          const c2 = document.createElement('span');
+          c2.style.cursor = 'pointer';
+          c2.textContent = (j === switchIdx ? '> ' : '  ') + SRCS[j];
+          c2.addEventListener('mouseenter', () => { switchIdx = j; renderSwitchMenu(); });
+          c2.addEventListener('click', () => { switchIdx = j; closeSwitchMenu(true); });
+          row.appendChild(c2);
+        }
+        switchPre.appendChild(row);
+      }
+    }
+
+    function showSwitchMenu() {
+      if (switchOpen || !focusedPane) return;
+      switchOpen = true;
+      const cur = focusedIframe.src.split('/').pop().replace('.html', '');
+      const ci  = SRCS.indexOf(cur);
+      switchIdx = ci >= 0 ? ci : 0;
+
+      switchOv = document.createElement('div');
+      Object.assign(switchOv.style, {
+        position:'fixed', inset:'0', zIndex:'9998',
+        background:'rgba(0,0,0,0.88)',
+        display:'flex', alignItems:'center', justifyContent:'center',
+        pointerEvents:'auto',
+      });
+
+      const sl = document.createElement('div');
+      Object.assign(sl.style, {
+        position:'absolute', inset:'0', pointerEvents:'none',
+        background:'repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.08) 2px,rgba(0,0,0,0.08) 4px)',
+      });
+      switchOv.appendChild(sl);
+
+      switchPre = document.createElement('pre');
+      Object.assign(switchPre.style, {
+        position:'relative', zIndex:'1', pointerEvents:'auto',
+        fontFamily:"'Share Tech Mono',monospace", fontSize:'14px',
+        lineHeight:'1.6', letterSpacing:'2px', whiteSpace:'pre', userSelect:'none',
+        color:_idxColor, textShadow:`0 0 8px ${_idxColor},0 0 20px ${_idxColor}80`,
+      });
+      renderSwitchMenu();
+      switchOv.appendChild(switchPre);
+      document.body.appendChild(switchOv);
+    }
+
+    function closeSwitchMenu(load) {
+      if (!switchOpen) return;
+      switchOpen = false;
+      if (load && focusedIframe) {
+        focusedIframe.src = 'visuals/' + SRCS[switchIdx] + '.html';
+      }
+      if (switchOv) { switchOv.remove(); switchOv = null; switchPre = null; }
+    }
+
+    window.addEventListener('keyup', e => {
+      broadcastKey('keyup', e);
+      if (e.key === 'Shift' && switchOpen) closeSwitchMenu(true);
+    });
+    window.addEventListener('blur', () => {
+      if (switchOpen) closeSwitchMenu(false);
+    });
+
+    // ── Focus management ──────────────────────────────────────────
+    function cyclePane(dir) {
+      const panes = rowPaneEls.flat();
+      if (!panes.length) return;
+      if (!focusedPane) { setFocus(dir >= 0 ? panes[0] : panes[panes.length - 1]); return; }
+      const idx  = panes.indexOf(focusedPane);
+      const next = (idx + dir + panes.length) % panes.length;
+      setFocus(panes[next]);
+    }
+
+    const idleS = document.getElementById('idle-s');
+
+    function setFocus(pane) {
+      if (pane === focusedPane) return;
+      if (focusedPane) {
+        focusedPane.querySelector('.focus-cover').style.display = '';
+        focusedPane.querySelector('.focus-s').style.display = 'none';
+      }
+      focusedPane   = pane;
+      focusedIframe = pane.querySelector('iframe');
+      pane.querySelector('.focus-cover').style.display = 'none';
+      pane.querySelector('.focus-s').style.display     = 'block';
+      idleS.style.visibility = 'hidden';
+      window.focus();
+    }
+
+    function clearFocus() {
+      if (!focusedPane) return;
+      focusedPane.querySelector('.focus-cover').style.display = '';
+      focusedPane.querySelector('.focus-s').style.display = 'none';
+      focusedPane   = null;
+      focusedIframe = null;
+      idleS.style.visibility = 'visible';
+      if (typeof _resetIdle === 'function') _resetIdle();
+      window.focus();
+    }
+
+    // ── Visualization cycling ─────────────────────────────────────
+    function cycleViz(dir) {
+      if (!focusedIframe) return;
+      const cur  = focusedIframe.src.split('/').pop().replace('.html', '');
+      const idx  = SRCS.indexOf(cur);
+      const next = (idx + dir + SRCS.length) % SRCS.length;
+      focusedIframe.src = 'visuals/' + SRCS[next] + '.html';
+    }
+
+    const KEY_SRC = {
+      W:'16_wave', N:'08_normal', S:'13_shimmer', H:'06_halo',
+      C:'02_cube', M:'07_mesh',   G:'05_grid',    D:'03_donut',
+      P:'11_pyramid', O:'09_octahedron', T:'14_topo', V:'15_vibe', B:'01_blob', Q:'12_quaternion', Z:'10_planes', F:'04_field', X:'17_nodes', L:'18_glitch', I:'19_lissajous', U:'20_automata', E:'21_lorenz', Y:'22_fourier', J:'23_trajectory', R:'24_ripple', K:'25_helmholtz', A:'26_rings', '0':'27_wormhole', '9':'28_superellipse', '8':'29_blackhole', '7':'30_intersect', '6':'31_voronoi', '5':'32_julia',
+    };
+
+    // ── postMessage broadcast to all iframes ─────────────────────
+    function broadcastKey(type, e) {
+      const isArrow = e.key === 'ArrowUp' || e.key === 'ArrowDown';
+      const focusOnly = isArrow || (helpCHeld && !(/^[cC]$/.test(e.key)));
+      const targets = focusOnly
+        ? (focusedPane ? [focusedPane] : [])
+        : rowPaneEls.flat();
+      targets.forEach(p => {
+        try { p.querySelector('iframe').contentWindow.postMessage({ type, key: e.key, shiftKey: !!e.shiftKey, cHeld: helpCHeld }, '*'); } catch {}
+      });
+    }
+
+    // ── Parent audio capture + broadcast ─────────────────────────
+    let _micStream = null, _audioCtx = null, _analyser = null;
+    let _timeDomain = null, _freqData = null, _parentMicActive = false;
+    let _sysStream = null, _sysActive = false;
+
+    function _teardownAudio() {
+      _micStream?.getTracks().forEach(t => t.stop()); _micStream = null;
+      _sysStream?.getTracks().forEach(t => t.stop()); _sysStream = null;
+      _audioCtx?.close(); _audioCtx = _analyser = _timeDomain = _freqData = null;
+      _parentMicActive = false; _sysActive = false;
+      document.getElementById('micbtn').textContent = 'M';
+      document.getElementById('abtn').textContent   = 'A';
+    }
+
+    function _setupAnalyser(stream) {
+      _audioCtx   = new (window.AudioContext || window.webkitAudioContext)();
+      const src   = _audioCtx.createMediaStreamSource(stream);
+      _analyser   = _audioCtx.createAnalyser();
+      _analyser.fftSize = 2048; _analyser.smoothingTimeConstant = 0.5;
+      src.connect(_analyser);
+      _timeDomain = new Uint8Array(_analyser.fftSize);
+      _freqData   = new Uint8Array(_analyser.frequencyBinCount);
+    }
+
+    document.getElementById('micbtn').addEventListener('click', async () => {
+      if (_parentMicActive) { _teardownAudio(); return; }
+      try {
+        _teardownAudio();
+        _micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        _setupAnalyser(_micStream);
+        _parentMicActive = true;
+      } catch {}
+    });
+
+    document.getElementById('abtn').addEventListener('click', async () => {
+      if (_sysActive) { _teardownAudio(); return; }
+      try {
+        _teardownAudio();
+        _sysStream = await navigator.mediaDevices.getDisplayMedia({ video: { width: 1, height: 1 }, audio: true });
+        // Drop video tracks — we only need audio
+        _sysStream.getVideoTracks().forEach(t => t.stop());
+        if (!_sysStream.getAudioTracks().length) { _sysStream = null; return; }
+        _setupAnalyser(_sysStream);
+        _sysActive = true;
+        // Auto-stop when user ends the share
+        _sysStream.getAudioTracks()[0].addEventListener('ended', () => _teardownAudio());
+      } catch {} // user cancelled picker
+    });
+
+    function _broadcastAudio() {
+      if ((_parentMicActive || _sysActive) && _analyser) {
+        _analyser.getByteTimeDomainData(_timeDomain);
+        _analyser.getByteFrequencyData(_freqData);
+        let sq = 0;
+        for (let k = 0; k < _timeDomain.length; k++) {
+          const d = _timeDomain[k] / 255 - 0.5; sq += d * d;
+        }
+        const rms = Math.sqrt(sq / _timeDomain.length);
+        const msg = { type: 'audioData', rms, freqData: Array.from(_freqData) };
+        rowPaneEls.flat().forEach(p => {
+          try { p.querySelector('iframe').contentWindow.postMessage(msg, '*'); } catch {}
+        });
+      }
+      requestAnimationFrame(_broadcastAudio);
+    }
+    requestAnimationFrame(_broadcastAudio);
+
+    function handleKey(key, shiftKey, broadcast = true) {
+      if (broadcast) broadcastKey('key', { key, shiftKey });
+      if (switchOpen) {
+        if (key === 'ArrowUp')   { switchIdx = (switchIdx - 1 + SRCS.length) % SRCS.length; renderSwitchMenu(); return; }
+        if (key === 'ArrowDown') { switchIdx = (switchIdx + 1) % SRCS.length; renderSwitchMenu(); return; }
+        if (key === 'Escape')    { closeSwitchMenu(false); return; }
+        // Map shift+number symbols back to digits (shift+5 → '%' → '5', etc.)
+        const shiftNumMap = {')':'0','!':'1','@':'2','#':'3','$':'4','%':'5','^':'6','&':'7','*':'8','(':'9'};
+        const resolved = shiftNumMap[key] || key;
+        if (KEY_SRC[resolved]) { closeSwitchMenu(false); focusedIframe.src = 'visuals/' + KEY_SRC[resolved] + '.html'; return; }
+        return;
+      }
+      if (helpVisible && (key === 'ArrowUp' || key === 'ArrowDown')) {
+        const dir = key === 'ArrowUp' ? -1 : 1;
+        if (_helpApplyText) {
+          helpUiColorIdx = (helpUiColorIdx + dir + VGA_COLORS.length) % VGA_COLORS.length;
+          _helpApplyText(VGA_COLORS[helpUiColorIdx]);
+        }
+        return;
+      }
+      if (key === 'Shift' && focusedPane) { showSwitchMenu(); return; }
+      if (key === ' ') {
+        if (helpVisible) { hideHelp(); return; }
+        const panes = rowPaneEls.flat();
+        if (!focusedPane) { if (panes.length) setFocus(panes[0]); }
+        else {
+          const idx = panes.indexOf(focusedPane);
+          if (idx === panes.length - 1) clearFocus();
+          else setFocus(panes[idx + 1]);
+        }
+        return;
+      }
+      const shiftNum2 = {')':'0','!':'1','@':'2','#':'3','$':'4','%':'5','^':'6','&':'7','*':'8','(':'9'};
+      const resolvedKey = shiftNum2[key] || key;
+      if (focusedPane && shiftKey && KEY_SRC[resolvedKey]) {
+        focusedIframe.src = 'visuals/' + KEY_SRC[resolvedKey] + '.html'; return;
+      }
+      if (key === 'h' || key === 'H') { if (helpVisible) hideHelp(); else showHelp(); return; }
+      if ((key === 'f' || key === 'F') && !shiftKey) { toggleFullscreen(); return; }
+      const idx = parseInt(key) - 1;
+      if (idx >= 0 && idx <= 5) buildLayout(idx);
+    }
+
+    window.addEventListener('keydown', e => {
+      if (e.key === 'ArrowUp' || e.key === 'ArrowDown') e.preventDefault();
+      if (e.key === ' ') e.preventDefault();
+      handleKey(e.key, e.shiftKey, true);
+    });
+
+    window.addEventListener('message', e => {
+      if (e.data?.type === 'childKey')    handleKey(e.data.key, !!e.data.shiftKey, false);
+      else if (e.data?.type === 'childKeyup') {
+        if (e.data.key === 'Shift' && switchOpen) closeSwitchMenu(true);
+        if (e.data.key === 'c' || e.data.key === 'C') helpCHeld = false;
+      }
+    });
+
+    // ── Layout application ────────────────────────────────────────
+    function applyRowHeights() {
+      rowWrapEls.forEach((wrap, r) => {
+        wrap.style.flex = `${rowFrs[r]} 1 0px`;
+      });
+    }
+
+    function applyRowCols(r) {
+      rowPaneEls[r].forEach((pane, c) => {
+        pane.style.flex = `${rowColFrs[r][c]} 1 0px`;
+      });
+    }
+
+    // ── Generic drag helper ───────────────────────────────────────
+    function startDrag(e, handle, onMove) {
+      e.preventDefault();
+      handle.classList.add('on');
+      glass.style.cursor  = getComputedStyle(handle).cursor;
+      glass.style.display = 'block';
+      const mv = ev => onMove(ev);
+      const up = () => {
+        glass.style.display = 'none';
+        handle.classList.remove('on');
+        window.removeEventListener('mousemove', mv);
+        window.removeEventListener('mouseup',   up);
+      };
+      window.addEventListener('mousemove', mv);
+      window.addEventListener('mouseup',   up);
+    }
+
+    function setupVDrag(el, r, ci) {
+      el.addEventListener('mousedown', e => {
+        const startX = e.clientX;
+        const cols   = rowColFrs[r];
+        const wrap   = rowWrapEls[r];
+        const totFr  = cols.reduce((a, b) => a + b, 0);
+        const avail  = wrap.clientWidth - (cols.length - 1) * VGAP;
+        const ppf    = avail / totFr;
+        const sL     = cols[ci]     * ppf;
+        const sR     = cols[ci + 1] * ppf;
+        startDrag(e, el, ev => {
+          const dx     = ev.clientX - startX;
+          cols[ci]     = Math.max(MINCOL, sL + dx) / ppf;
+          cols[ci + 1] = Math.max(MINCOL, sR - dx) / ppf;
+          applyRowCols(r);
+        });
+      });
+    }
+
+    function setupHDrag(el, ri) {
+      el.addEventListener('mousedown', e => {
+        const startY = e.clientY;
+        const totFr  = rowFrs.reduce((a, b) => a + b, 0);
+        const avail  = gridEl.clientHeight - (rowFrs.length - 1) * HGAP;
+        const ppf    = avail / totFr;
+        const sT     = rowFrs[ri]     * ppf;
+        const sB     = rowFrs[ri + 1] * ppf;
+        startDrag(e, el, ev => {
+          const dy       = ev.clientY - startY;
+          rowFrs[ri]     = Math.max(MINROW, sT + dy) / ppf;
+          rowFrs[ri + 1] = Math.max(MINROW, sB - dy) / ppf;
+          applyRowHeights();
+        });
+      });
+    }
+
+    // ── Build layout ──────────────────────────────────────────────
+    function buildLayout(modeIdx) {
+      document.querySelectorAll('.lbtn').forEach((b, i) => b.classList.toggle('selected', i === modeIdx));
+      // Retain existing viz sources; new panes get unused ones
+      const prevSrcs = rowPaneEls.flat().map(p =>
+        p.querySelector('iframe').src.split('/').pop().replace('.html', '')
+      );
+      const newPool = [...SRCS]
+        .filter(s => !prevSrcs.includes(s))
+        .sort(() => Math.random() - 0.5);
+      let newIdx = 0;
+
+      clearFocus();
+      hideHelp();
+      firstPane  = null;
+      rowFrs     = [];
+      rowColFrs  = [];
+      rowWrapEls = [];
+      rowPaneEls = [];
+
+      const { cols, rows } = MODES[modeIdx];
+      rowFrs    = Array(rows).fill(1);
+      rowColFrs = Array.from({ length: rows }, () => Array(cols).fill(1));
+
+      gridEl.innerHTML = '';
+      let paneIdx = 0;
+
+      for (let r = 0; r < rows; r++) {
+        if (r > 0) {
+          const hd = document.createElement('div');
+          hd.className = 'hdrag';
+          setupHDrag(hd, r - 1);
+          gridEl.appendChild(hd);
+        }
+
+        const wrap = document.createElement('div');
+        wrap.className = 'row-wrap';
+        wrap.style.flex = `${rowFrs[r]} 1 0px`;
+        rowWrapEls.push(wrap);
+        rowPaneEls.push([]);
+
+        for (let c = 0; c < cols; c++) {
+          if (c > 0) {
+            const vd = document.createElement('div');
+            vd.className = 'vdrag';
+            setupVDrag(vd, r, c - 1);
+            wrap.appendChild(vd);
+          }
+
+          const pane = document.createElement('div');
+          pane.className = 'pane';
+          pane.style.flex = `${rowColFrs[r][c]} 1 0px`;
+
+          const iframe = document.createElement('iframe');
+          const src = paneIdx < prevSrcs.length
+            ? prevSrcs[paneIdx]
+            : newPool.length ? newPool[newIdx++ % newPool.length] : SRCS[paneIdx % SRCS.length];
+          iframe.src = 'visuals/' + src + '.html';
+          pane.appendChild(iframe);
+
+          const s = document.createElement('div');
+          s.className   = 'focus-s';
+          s.textContent = '█';
+          pane.appendChild(s);
+
+          const cover = document.createElement('div');
+          cover.className = 'focus-cover';
+          cover.addEventListener('click', () => setFocus(pane));
+          pane.appendChild(cover);
+
+          if (paneIdx === 0) firstPane = pane;
+          wrap.appendChild(pane);
+          rowPaneEls[r].push(pane);
+          paneIdx++;
+        }
+
+        gridEl.appendChild(wrap);
+      }
+    }
+
+    // M/A buttons: letter at rest, cycling Braille when active
+    const _micBtn = document.getElementById('micbtn');
+    const _aBtn   = document.getElementById('abtn');
+    _micBtn.textContent = 'M';
+    setInterval(() => {
+      if (_parentMicActive) _micBtn.textContent = hrb();
+      if (_sysActive)       _aBtn.textContent   = hrb();
+    }, 140);
+
+    buildLayout(0);  // start with single window (key 1)
+    document.getElementById('hbtn').addEventListener('click', () => showHelp());
+    document.querySelectorAll('.lbtn').forEach(btn =>
+      btn.addEventListener('click', () => buildLayout(+btn.dataset.layout))
+    );
+
+    function toggleFullscreen() {
+      if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+      else document.exitFullscreen();
+    }
+    document.getElementById('fbtn').addEventListener('click', toggleFullscreen);
+
+    // ── Mouse idle → fade toolbar ────────────────────────────────
+    let _idleTimer = null;
+    const _statusbar = document.getElementById('statusbar');
+    function _resetIdle() {
+      _statusbar.classList.remove('idle');
+      clearTimeout(_idleTimer);
+      _idleTimer = setTimeout(() => _statusbar.classList.add('idle'), 4000);
+    }
+    document.addEventListener('mousemove', _resetIdle);
+    document.addEventListener('mousedown', _resetIdle);
+    _resetIdle();
+
+    document.getElementById('statusbar').addEventListener('click', e => {
+      if (!e.target.closest('#hbtn') && !e.target.closest('#fbtn') && !e.target.closest('.lbtn') && !e.target.closest('#micbtn') && !e.target.closest('#abtn')) clearFocus();
+    });
+  </script>
+</body>
+</html>

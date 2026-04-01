@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Lorenz</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #000; height: 100vh; overflow: hidden; font-family: 'Share Tech Mono', monospace; }
+  body::before {
+    content: ''; position: fixed; inset: 0;
+    background: radial-gradient(ellipse at center, #0a0f00 0%, #000 70%); z-index: 0;
+  }
+  #canvas { position: fixed; inset: 0; z-index: 1; display: block; }
+  .scanline {
+    position: fixed; inset: 0;
+    background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.08) 2px, rgba(0,0,0,0.08) 4px);
+    pointer-events: none; z-index: 2;
+  }
+  .vignette {
+    position: fixed; inset: 0;
+    background: radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.7) 100%);
+    pointer-events: none; z-index: 3;
+  }
+  #btn {
+    all: unset; position: fixed; top: 20px; left: 24px; z-index: 4;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px;
+    color: #39ff14; letter-spacing: 3px; cursor: pointer;
+  }
+  #tgkeys {
+    position: fixed; top: 54px; left: 24px; z-index: 4;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px;
+    letter-spacing: 3px; color: #39ff14;
+    display: flex; gap: 1ch;
+  }
+  #ekey { cursor: pointer; }
+  #grain-cv {
+    position: fixed; inset: 0; width: 100%; height: 100%;
+    pointer-events: none; z-index: 5;
+  }
+  #legend {
+    position: fixed; top: 20px; right: 24px; z-index: 4;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px;
+    display: grid; grid-template-columns: repeat(8, 1em);
+    gap: 4px 6px; line-height: 1.4; text-align: center;
+  }
+  #zko {
+    position: fixed; bottom: 20px; left: 24px; z-index: 4;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px;
+    letter-spacing: 3px; color: #39ff14; text-decoration: none; cursor: pointer;
+  }
+  #ops {
+    position: fixed; bottom: 20px; right: 24px; z-index: 4;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px;
+    letter-spacing: 3px; color: #39ff14;
+  }
+  #speed {
+    position: fixed; bottom: 40px; right: 24px; z-index: 4;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px;
+    letter-spacing: 3px; color: #39ff14; user-select: none;
+  }
+  #speed span { cursor: pointer; }
+  #ckey {
+    position: fixed; top: 68px; right: 24px; width: 1em; z-index: 4;
+    font-family: 'Share Tech Mono', monospace; font-size: 14px;
+    line-height: 1.4; color: #39ff14; text-align: center; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div class="scanline"></div>
+<div class="vignette"></div>
+<button id="btn"></button>
+<div id="tgkeys"><div id="ekey">T</div></div>
+<div id="legend"></div>
+<div id="ops"></div>
+<div id="speed"><span id="slower">&lt;</span> <span id="faster">&gt;</span></div>
+<div id="ckey">C</div>
+<a id="zko" href="https://zko.io" target="_blank" rel="noopener"></a>
+<canvas id="grain-cv"></canvas>
+<canvas id="canvas"></canvas>
+<script>
+  const canvas = document.getElementById('canvas');
+  const ctx    = canvas.getContext('2d');
+
+  let W, H;
+  function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+  resize();
+  window.addEventListener('resize', resize);
+
+  // ── Character helpers ─────────────────────────────────────
+  const POOL = '.,:;+*#@0123456789';
+  const rc = () => POOL[Math.floor(Math.random() * POOL.length)];
+  const rb = () => String.fromCodePoint(0x2801 + Math.floor(Math.random() * 255));
+
+  // ── VGA 16-color palette ──────────────────────────────────
+  const VGA = [
+    '#000000','#0000AA','#00AA00','#00AAAA',
+    '#AA0000','#AA00AA','#AA5500','#AAAAAA',
+    '#555555','#5555FF','#55FF55','#55FFFF',
+    '#FF5555','#FF55FF','#FFFF55','#FFFFFF',
+  ];
+
+  // ── State ─────────────────────────────────────────────────
+  let lineColor = '#39ff14', colorIdx = 10, uiColorIdx = 10;
+  let cycleMs   = 280;
+  let ampLevel  = 0, ampWasHigh = false;
+  let lastTs    = null, parentAudio = null;
+
+  // ── Audio ─────────────────────────────────────────────────
+  let micActive = false, micStream = null, audioCtx = null, analyser = null, timeDomain = null;
+
+  // ── Lorenz attractor ──────────────────────────────────────
+  const SIG = 10, RHO = 28, BET = 8 / 3;
+  const TRAIL_MAX = 4000;
+  const trail = [];
+  let lx = 0.1, ly = 0, lz = 0;
+  const ISO_PITCH = Math.atan(1 / Math.sqrt(2));
+  let rotAngle = 0;
+  let wiggle = 0;
+
+  function lorenzStep(dt) {
+    const dx = SIG * (ly - lx);
+    const dy = lx * (RHO - lz) - ly;
+    const dz = lx * ly - BET * lz;
+    lx += dx * dt; ly += dy * dt; lz += dz * dt;
+  }
+
+  function triggerLorenz() {
+    wiggle = Math.min(1, wiggle + 0.7);
+  }
+
+  // ── Render ────────────────────────────────────────────────
+  function frame(ts) {
+    if (!lastTs) lastTs = ts;
+    const dt = Math.min((ts - lastTs) / 1000, 0.05);
+    lastTs = ts;
+
+    // Audio
+    if (micActive || parentAudio) {
+      let rms;
+      if (micActive) {
+        analyser.getByteTimeDomainData(timeDomain);
+        let sq = 0;
+        for (let k = 0; k < timeDomain.length; k++) { const d = timeDomain[k] / 255 - 0.5; sq += d * d; }
+        rms = Math.sqrt(sq / timeDomain.length);
+      } else { rms = parentAudio.rms; }
+      ampLevel += (rms * 5 - ampLevel) * 0.12;
+      if (rms > 0.05 && !ampWasHigh) { triggerLorenz(); ampWasHigh = true; }
+      else if (rms < 0.03) ampWasHigh = false;
+    } else {
+      ampLevel *= 0.92;
+    }
+
+    // Integrate multiple steps per frame
+    const stepsPerFrame = Math.ceil(4 * (140 / cycleMs));
+    const h = 0.005 * (1 + ampLevel * 1.5);
+    for (let i = 0; i < stepsPerFrame; i++) {
+      lorenzStep(h);
+      trail.push([lx, ly, lz]);
+    }
+    while (trail.length > TRAIL_MAX) trail.shift();
+
+    rotAngle += dt * 0.12 * (140 / cycleMs);
+    wiggle = Math.max(wiggle, ampLevel * 0.3);
+    wiggle *= 0.94;
+    ctx.clearRect(0, 0, W, H);
+
+    const scale = Math.min(W * 0.42 / 40, H * 0.42 / 50);
+    const cx = W / 2, cy = H / 2;
+    const cosY = Math.cos(rotAngle), sinY = Math.sin(rotAngle);
+    const cosP = Math.cos(ISO_PITCH), sinP = Math.sin(ISO_PITCH);
+    const proj = ([x, y, z]) => {
+      const zc = z - 25;
+      const rx1 =  x * cosY + zc * sinY;
+      const ry1 =  y;
+      const rz1 = -x * sinY + zc * cosY;
+      const ry2 = ry1 * cosP - rz1 * sinP;
+      return [cx + rx1 * scale, cy - ry2 * scale];
+    };
+
+    // ── Isometric reference box ───────────────────────────────
+    const BX1 = -25, BX2 = 25;
+    const BY1 = -25, BY2 = 25;
+    const BZ1 = 0,   BZ2 = 50;
+    const projBox = (x, y, z) => {
+      const zc = z - 25;
+      const rx1 =  x * cosY + zc * sinY;
+      const ry1 =  y;
+      const rz1 = -x * sinY + zc * cosY;
+      const ry2 = ry1 * cosP - rz1 * sinP;
+      return [cx + rx1 * scale, cy - ry2 * scale];
+    };
+    const drawLine = (ax, ay, bx, by) => {
+      ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+    };
+    ctx.strokeStyle = lineColor;
+    ctx.shadowColor = lineColor;
+    ctx.shadowBlur  = 0;
+    ctx.lineWidth   = 0.5;
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 0.14;
+    // Floor (z = BZ1)
+    for (let i = 0; i <= 5; i++) {
+      const x = BX1 + (BX2 - BX1) * i / 5;
+      const [ax, ay] = projBox(x, BY1, BZ1), [bx, by] = projBox(x, BY2, BZ1);
+      drawLine(ax, ay, bx, by);
+    }
+    for (let j = 0; j <= 5; j++) {
+      const y = BY1 + (BY2 - BY1) * j / 5;
+      const [ax, ay] = projBox(BX1, y, BZ1), [bx, by] = projBox(BX2, y, BZ1);
+      drawLine(ax, ay, bx, by);
+    }
+    // Back wall (y = BY2)
+    for (let i = 0; i <= 5; i++) {
+      const x = BX1 + (BX2 - BX1) * i / 5;
+      const [ax, ay] = projBox(x, BY2, BZ1), [bx, by] = projBox(x, BY2, BZ2);
+      drawLine(ax, ay, bx, by);
+    }
+    for (let k = 0; k <= 5; k++) {
+      const z = BZ1 + (BZ2 - BZ1) * k / 5;
+      const [ax, ay] = projBox(BX1, BY2, z), [bx, by] = projBox(BX2, BY2, z);
+      drawLine(ax, ay, bx, by);
+    }
+    // Right wall (x = BX2)
+    for (let j = 0; j <= 5; j++) {
+      const y = BY1 + (BY2 - BY1) * j / 5;
+      const [ax, ay] = projBox(BX2, y, BZ1), [bx, by] = projBox(BX2, y, BZ2);
+      drawLine(ax, ay, bx, by);
+    }
+    for (let k = 0; k <= 5; k++) {
+      const z = BZ1 + (BZ2 - BZ1) * k / 5;
+      const [ax, ay] = projBox(BX2, BY1, z), [bx, by] = projBox(BX2, BY2, z);
+      drawLine(ax, ay, bx, by);
+    }
+    // Box edges (12)
+    ctx.globalAlpha = 0.38;
+    ctx.lineWidth   = 0.85;
+    ctx.setLineDash([5, 7]);
+    const corners = [
+      [BX1,BY1,BZ1],[BX2,BY1,BZ1],[BX1,BY2,BZ1],[BX2,BY2,BZ1],
+      [BX1,BY1,BZ2],[BX2,BY1,BZ2],[BX1,BY2,BZ2],[BX2,BY2,BZ2],
+    ];
+    const edges = [
+      [0,1],[2,3],[4,5],[6,7],
+      [0,2],[1,3],[4,6],[5,7],
+      [0,4],[1,5],[2,6],[3,7],
+    ];
+    for (const [a, b] of edges) {
+      const [ax, ay] = projBox(...corners[a]);
+      const [bx, by] = projBox(...corners[b]);
+      drawLine(ax, ay, bx, by);
+    }
+    ctx.setLineDash([]);
+
+    // Tick labels & axis names
+    ctx.fillStyle  = lineColor;
+    ctx.shadowBlur = 0;
+    ctx.font = '14px "Share Tech Mono", monospace';
+    ctx.globalAlpha = 0.60;
+    // x label: end of x axis (front-bottom-left corner)
+    ctx.textAlign = 'right';
+    { const [px, py] = projBox(BX1, BY1, BZ1); ctx.fillText('x', px - 6, py + 6); }
+    // y label: end of y axis (right-bottom-far corner)
+    ctx.textAlign = 'left';
+    { const [px, py] = projBox(BX2, BY2, BZ1); ctx.fillText('y', px + 10, py + 6); }
+    // z label: top of z axis
+    { const [px, py] = projBox(BX2, BY2, BZ2); ctx.fillText('z', px + 6, py - 6); }
+
+    // Shake offset for trail (box is already drawn above, unaffected)
+    const shakeX = wiggle > 0.01 ? (Math.random() - 0.5) * wiggle * 18 : 0;
+    const shakeY = wiggle > 0.01 ? (Math.random() - 0.5) * wiggle * 18 : 0;
+    ctx.save();
+    ctx.translate(shakeX, shakeY);
+
+    // 2-pass glow, 4 trail sections
+    const passes = [
+      { blur: 6,  alpha: 0.28, lw: 1.8 },
+      { blur: 0,  alpha: 0.70, lw: 0.7 },
+    ];
+    const N_SEC    = 4;
+    const N_COPIES = 5;
+    for (const { blur, alpha, lw } of passes) {
+      ctx.strokeStyle = lineColor;
+      ctx.shadowColor = lineColor;
+      ctx.shadowBlur  = blur + wiggle * 28;
+      ctx.lineWidth   = lw;
+      for (let c = 0; c < N_COPIES; c++) {
+        const ca = (c / N_COPIES) * Math.PI * 2;
+        const cc = Math.cos(ca), cs = Math.sin(ca);
+        const projC = (pt) => {
+          const [px, py] = proj(pt);
+          const dx = px - cx, dy = py - cy;
+          return [cx + dx * cc - dy * cs, cy + dx * cs + dy * cc];
+        };
+        for (let s = 0; s < N_SEC; s++) {
+          const i0 = Math.floor(s       * trail.length / N_SEC);
+          const i1 = Math.min(Math.floor((s + 1) * trail.length / N_SEC), trail.length - 1);
+          ctx.globalAlpha = alpha * (s + 1) / N_SEC;
+          ctx.beginPath();
+          for (let i = i0; i <= i1; i++) {
+            const [px, py] = projC(trail[i]);
+            if (i === i0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+          }
+          ctx.stroke();
+        }
+      }
+    }
+    ctx.restore();
+
+    ctx.globalAlpha = 1;
+    ctx.shadowBlur  = 0;
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+
+  // ── Grain ─────────────────────────────────────────────────
+  let grainOn = true;
+  const grainEl = document.getElementById('grain-cv');
+  const grainCx = grainEl.getContext('2d');
+  let grainImg = null;
+  function drawGrainFrame() {
+    if (!grainOn) return;
+    const gW = Math.ceil(window.innerWidth  / 2);
+    const gH = Math.ceil(window.innerHeight / 2);
+    if (grainEl.width !== gW || grainEl.height !== gH) {
+      grainEl.width = gW; grainEl.height = gH;
+      grainImg = grainCx.createImageData(gW, gH);
+    }
+    const data = grainImg.data;
+    for (let i = 0; i < data.length; i += 4) {
+      const v = Math.random() * 255 | 0;
+      data[i] = data[i+1] = data[i+2] = v;
+      data[i+3] = Math.random() * 30 | 0;
+    }
+    grainCx.putImageData(grainImg, 0, 0);
+    requestAnimationFrame(drawGrainFrame);
+  }
+  function toggleGrain() {
+    grainOn = !grainOn;
+    document.getElementById('gkey').style.opacity = grainOn ? '0.4' : '';
+    if (grainOn) drawGrainFrame();
+  }
+  window.addEventListener('keydown', e => { if (e.key === 'g' || e.key === 'G') toggleGrain(); });
+  drawGrainFrame();
+
+  // ── Canvas / trigger key click ────────────────────────────
+  canvas.addEventListener('click', triggerLorenz);
+  document.getElementById('ekey').addEventListener('click', triggerLorenz);
+
+  // ── Mic toggle ────────────────────────────────────────────
+  const btn = document.getElementById('btn');
+  btn.addEventListener('click', async () => {
+    if (micActive) {
+      micActive = false; btn.style.opacity = '0.4';
+      micStream?.getTracks().forEach(t => t.stop()); audioCtx?.close();
+      micStream = audioCtx = analyser = timeDomain = null; ampLevel = 0; return;
+    }
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      audioCtx  = new (window.AudioContext || window.webkitAudioContext)();
+      const src = audioCtx.createMediaStreamSource(micStream);
+      analyser  = audioCtx.createAnalyser();
+      analyser.fftSize = 2048; analyser.smoothingTimeConstant = 0.5;
+      src.connect(analyser);
+      timeDomain = new Uint8Array(analyser.fftSize);
+      micActive  = true; btn.style.opacity = '';
+    } catch { /* permission denied */ }
+  });
+
+  // ── C-key modifier ────────────────────────────────────────
+  let cHeld = false;
+
+  // ── VGA legend ────────────────────────────────────────────
+  const legendEl = document.getElementById('legend');
+  const opsEl    = document.getElementById('ops');
+  const zkoEl    = document.getElementById('zko');
+
+  const legendSpans = VGA.map(col => {
+    const s = document.createElement('span');
+    s.style.color = col; s.style.cursor = 'pointer'; s.textContent = rc();
+    s.addEventListener('click', () => {
+      if (cHeld) {
+        btn.style.color  = col; opsEl.style.color = col; zkoEl.style.color = col;
+        document.getElementById('ckey').style.color   = col;
+        document.getElementById('speed').style.color  = col;
+        document.getElementById('tgkeys').style.color = col;
+      } else { lineColor = col; colorIdx = VGA.indexOf(col); }
+    });
+    legendEl.appendChild(s); return s;
+  });
+
+  zkoEl.textContent = rc()+rc()+rc()+rc();
+  btn.textContent   = rb();
+  opsEl.textContent = rc()+rc()+rc()+rc();
+
+  setInterval(() => { btn.textContent = rb(); }, 140);
+  setInterval(() => {
+    opsEl.textContent = rc()+rc()+rc()+rc();
+    zkoEl.textContent = rc()+rc()+rc()+rc();
+    legendSpans.forEach(s => s.textContent = rc());
+  }, 200);
+
+  // ── Speed UI ─────────────────────────────────────────────
+  function updateSpeedUI() {
+    const sl = document.getElementById('slower'), fa = document.getElementById('faster');
+    sl.style.opacity = cycleMs >= 560 ? '0.4' : '1'; sl.style.pointerEvents = cycleMs >= 560 ? 'none' : '';
+    fa.style.opacity = cycleMs <= 140 ? '0.4' : '1'; fa.style.pointerEvents = cycleMs <= 140 ? 'none' : '';
+  }
+  updateSpeedUI();
+  document.getElementById('slower').addEventListener('click', () => { cycleMs = Math.min(560, cycleMs + 140); updateSpeedUI(); });
+  document.getElementById('faster').addEventListener('click', () => { cycleMs = Math.max(140, cycleMs - 140); updateSpeedUI(); });
+
+  // ── Keyboard ─────────────────────────────────────────────
+  window.addEventListener('keydown', e => {
+    if (e.isTrusted) window.parent?.postMessage({ type: 'childKey', key: e.key, shiftKey: !!e.shiftKey }, '*');
+    if      (e.key === 't' || e.key === 'T')           triggerLorenz();
+    else if (e.key === 'ArrowLeft'  && !cHeld)    { cycleMs = Math.min(560, cycleMs + 140); updateSpeedUI(); }
+    else if (e.key === 'ArrowRight' && !cHeld)    { cycleMs = Math.max(140, cycleMs - 140); updateSpeedUI(); }
+    else if (!cHeld && e.key === 'ArrowUp')      { colorIdx = (colorIdx - 1 + VGA.length) % VGA.length; lineColor = VGA[colorIdx]; }
+    else if (!cHeld && e.key === 'ArrowDown')     { colorIdx = (colorIdx + 1) % VGA.length; lineColor = VGA[colorIdx]; }
+    else if (cHeld && e.key === 'ArrowUp') {
+      uiColorIdx = (uiColorIdx - 1 + VGA.length) % VGA.length;
+      btn.style.color  = VGA[uiColorIdx]; opsEl.style.color = VGA[uiColorIdx]; zkoEl.style.color = VGA[uiColorIdx];
+      document.getElementById('ckey').style.color   = VGA[uiColorIdx];
+      document.getElementById('speed').style.color  = VGA[uiColorIdx];
+      document.getElementById('tgkeys').style.color = VGA[uiColorIdx];
+    } else if (cHeld && e.key === 'ArrowDown') {
+      uiColorIdx = (uiColorIdx + 1) % VGA.length;
+      btn.style.color  = VGA[uiColorIdx]; opsEl.style.color = VGA[uiColorIdx]; zkoEl.style.color = VGA[uiColorIdx];
+      document.getElementById('ckey').style.color   = VGA[uiColorIdx];
+      document.getElementById('speed').style.color  = VGA[uiColorIdx];
+      document.getElementById('tgkeys').style.color = VGA[uiColorIdx];
+    }
+    else if (e.key === 'c' || e.key === 'C')           cHeld = true;
+  });
+
+  window.addEventListener('keyup', e => {
+    if (e.isTrusted) window.parent?.postMessage({ type: 'childKeyup', key: e.key }, '*');
+    if (e.key === 'c' || e.key === 'C') cHeld = false;
+  });
+
+  // ── postMessage bridge ────────────────────────────────────
+  window.addEventListener('message', e => {
+    if (e.data?.type === 'key') {
+      if (e.data.cHeld !== undefined) cHeld = !!e.data.cHeld;
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: e.data.key, shiftKey: !!e.data.shiftKey, bubbles: true }));
+    }
+    else if (e.data?.type === 'keyup')
+      window.dispatchEvent(new KeyboardEvent('keyup', { key: e.data.key, bubbles: true }));
+    else if (e.data?.type === 'audioData')
+      parentAudio = e.data;
+  });
+
+  // Randomize colors on load
+  (function() {
+    const GOOD = [6,11,13,14,15];
+    colorIdx  = GOOD[Math.floor(Math.random() * GOOD.length)];
+    lineColor = VGA[colorIdx];
+    const _uiPool = GOOD.filter(i => i !== colorIdx);
+    uiColorIdx = _uiPool[Math.floor(Math.random() * _uiPool.length)];
+    const _uc = VGA[uiColorIdx];
+    if (btn)   btn.style.color   = _uc;
+    if (opsEl) opsEl.style.color = _uc;
+    if (zkoEl) zkoEl.style.color = _uc;
+    const _ck = document.getElementById('ckey');
+    const _tk = document.getElementById('tgkeys');
+    const _sp = document.getElementById('speed');
+    if (_ck) _ck.style.color = _uc;
+    if (_tk) _tk.style.color = _uc;
+    if (_sp) _sp.style.color = _uc;
+  })();
+</script>
+</body>
+</html>
