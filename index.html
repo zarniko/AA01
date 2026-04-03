@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
   <title>AA01</title>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
@@ -136,6 +137,7 @@
 </head>
 <body>
   <div id="grid"></div>
+  <div id="touch-overlay" style="display:none;position:fixed;inset:0;z-index:30;"></div>
   <div id="glass"></div>
   <div id="statusbar">
     <div id="idle-s">█</div>
@@ -163,6 +165,8 @@
       { cols: 3, rows: 2 },  // key 5
       { cols: 4, rows: 2 },  // key 6
     ];
+
+    const isMobile = ('ontouchstart' in window) || window.innerWidth <= 768;
 
     const gridEl = document.getElementById('grid');
     const glass  = document.getElementById('glass');
@@ -293,6 +297,21 @@
       '  shift+5    32_julia',
     ];
 
+    const HELP_MOBILE = [
+      '  TOUCH',
+      '  ' + '-'.repeat(28),
+      '  tap           trigger',
+      '  swipe ←→      cycle visual',
+      '  swipe ↑↓      cycle color',
+      '  2-finger ↑↓   cycle ui color',
+      '',
+      '  AUDIO',
+      '  ' + '-'.repeat(28),
+      '  [btn]         mic toggle',
+      '',
+      '  TAP TO CLOSE',
+    ];
+
     function showHelp() {
       if (helpVisible) return;
       helpVisible = true;
@@ -301,8 +320,10 @@
       ov.id = 'help-ov';
       Object.assign(ov.style, {
         position:'fixed', inset:'0', zIndex:'9999', background:'rgba(0,0,0,0.88)',
-        overflow:'hidden', display:'flex', alignItems:'center', justifyContent:'center',
+        overflow: isMobile ? 'auto' : 'hidden',
+        display:'flex', alignItems:'center', justifyContent:'center',
       });
+      if (isMobile) ov.addEventListener('click', () => hideHelp());
 
       const sl = document.createElement('div');
       Object.assign(sl.style, {
@@ -321,7 +342,7 @@
       const _hRect = document.getElementById('hbtn').getBoundingClientRect();
       const escLabel = document.createElement('div');
       escLabel.id = 'help-esc-label';
-      escLabel.textContent = 'SPACE / H';
+      escLabel.textContent = isMobile ? 'H' : 'SPACE / H';
       Object.assign(escLabel.style, {
         position:'fixed',
         right: (window.innerWidth - _hRect.right) + 'px',
@@ -334,78 +355,128 @@
       escLabel.addEventListener('click', () => hideHelp());
       ov.appendChild(escLabel);
 
-      const cols = document.createElement('div');
-      Object.assign(cols.style, {
-        position:'relative', zIndex:'3',
-        display:'flex', gap:'80px', alignItems:'flex-start',
-      });
-
       const preStyle = {
-        fontFamily:"'Share Tech Mono',monospace", fontSize:'14px',
+        fontFamily:"'Share Tech Mono',monospace",
+        fontSize: isMobile ? '12px' : '14px',
         lineHeight:'1.6', letterSpacing:'2px', whiteSpace:'pre', userSelect:'none',
         color:_idxColor, textShadow:`0 0 8px ${_idxColor},0 0 20px ${_idxColor}80`,
       };
 
-      const preL = document.createElement('pre');
-      preL.id = 'help-pre';
-      Object.assign(preL.style, preStyle);
-      preL.innerHTML = HELP_LEFT.map(l =>
-        l.replace('[btn]', `<span id="help-btn-span">${hrb()}</span>`)
-      ).join('\n');
-      cols.appendChild(preL);
-
-      const half      = Math.ceil(HELP_SHIFT.length / 2);
-      const shiftCol1 = HELP_SHIFT.slice(0, half);
-      const shiftCol2 = HELP_SHIFT.slice(half);
-      const colW      = Math.max(...shiftCol1.map(s => s.length)) + 4;
-      const shiftText = shiftCol1.map((l, i) => l.padEnd(colW) + (shiftCol2[i] || '')).join('\n');
-
-      const preR = document.createElement('pre');
-      Object.assign(preR.style, preStyle);
-      preR.textContent = HELP_RIGHT_TOP.join('\n') + '\n\n' + shiftText;
-      cols.appendChild(preR);
-
-      ov.appendChild(cols);
-
-      const legWrap = document.createElement('div');
-      Object.assign(legWrap.style, {
-        position:'absolute', top:'20px', right:'24px', zIndex:'4',
-        display:'flex', flexDirection:'column', alignItems:'flex-end', gap:'0.4em',
-      });
-      ov.appendChild(legWrap);
-
-      const leg = document.createElement('div');
-      Object.assign(leg.style, {
-        fontFamily:"'Share Tech Mono',monospace", fontSize:'14px',
-        display:'grid', gridTemplateColumns:'repeat(8,1em)',
-        gap:'4px 6px', lineHeight:'1.4', textAlign:'center',
-      });
-      legWrap.appendChild(leg);
-
-      const applyAllColor = col => {
-        [preL, preR].forEach(p => {
-          p.style.color      = col;
-          p.style.textShadow = `0 0 8px ${col},0 0 20px ${col}80`;
+      if (isMobile) {
+        // Single-column mobile layout
+        const wrap = document.createElement('div');
+        Object.assign(wrap.style, {
+          position:'relative', zIndex:'3',
+          display:'flex', flexDirection:'column', alignItems:'flex-start',
+          padding:'60px 32px 40px',
         });
-        applyIndexColor(col);
-      };
 
-      const legendSpans = VGA_COLORS.map(col => {
-        const s = document.createElement('span');
-        s.style.color  = col;
-        s.style.cursor = 'pointer';
-        s.textContent  = hrc();
-        s.addEventListener('click', () => { applyAllColor(col); });
-        leg.appendChild(s);
-        return s;
-      });
+        const preM = document.createElement('pre');
+        preM.id = 'help-pre';
+        Object.assign(preM.style, preStyle);
+        preM.innerHTML = HELP_MOBILE.map(l =>
+          l.replace('[btn]', `<span id="help-btn-span">${hrb()}</span>`)
+        ).join('\n');
+        wrap.appendChild(preM);
 
-      _helpApplyText = applyAllColor;
-      helpCycleId = setInterval(() => {
-        legendSpans.forEach(s => s.textContent = hrc());
-        const bs = document.getElementById('help-btn-span');
-        if (bs) bs.textContent = hrb();
-      }, 140);
+        const leg = document.createElement('div');
+        Object.assign(leg.style, {
+          fontFamily:"'Share Tech Mono',monospace", fontSize:'14px',
+          display:'grid', gridTemplateColumns:'repeat(8,1.4em)',
+          gap:'6px 8px', lineHeight:'1.4', textAlign:'center',
+          marginTop:'24px',
+        });
+        wrap.appendChild(leg);
+        ov.appendChild(wrap);
+
+        const applyAllColor = col => {
+          [preM].forEach(p => {
+            p.style.color      = col;
+            p.style.textShadow = `0 0 8px ${col},0 0 20px ${col}80`;
+          });
+          applyIndexColor(col);
+        };
+
+        const legendSpans = VGA_COLORS.map(col => {
+          const s = document.createElement('span');
+          s.style.color  = col; s.style.cursor = 'pointer'; s.textContent = hrc();
+          s.addEventListener('click', e => { e.stopPropagation(); applyAllColor(col); });
+          leg.appendChild(s); return s;
+        });
+
+        _helpApplyText = applyAllColor;
+        helpCycleId = setInterval(() => {
+          legendSpans.forEach(s => s.textContent = hrc());
+          const bs = document.getElementById('help-btn-span');
+          if (bs) bs.textContent = hrb();
+        }, 140);
+
+      } else {
+        // Desktop two-column layout (unchanged)
+        const cols = document.createElement('div');
+        Object.assign(cols.style, {
+          position:'relative', zIndex:'3',
+          display:'flex', gap:'80px', alignItems:'flex-start',
+        });
+
+        const preL = document.createElement('pre');
+        preL.id = 'help-pre';
+        Object.assign(preL.style, preStyle);
+        preL.innerHTML = HELP_LEFT.map(l =>
+          l.replace('[btn]', `<span id="help-btn-span">${hrb()}</span>`)
+        ).join('\n');
+        cols.appendChild(preL);
+
+        const half      = Math.ceil(HELP_SHIFT.length / 2);
+        const shiftCol1 = HELP_SHIFT.slice(0, half);
+        const shiftCol2 = HELP_SHIFT.slice(half);
+        const colW      = Math.max(...shiftCol1.map(s => s.length)) + 4;
+        const shiftText = shiftCol1.map((l, i) => l.padEnd(colW) + (shiftCol2[i] || '')).join('\n');
+
+        const preR = document.createElement('pre');
+        Object.assign(preR.style, preStyle);
+        preR.textContent = HELP_RIGHT_TOP.join('\n') + '\n\n' + shiftText;
+        cols.appendChild(preR);
+        ov.appendChild(cols);
+
+        const legWrap = document.createElement('div');
+        Object.assign(legWrap.style, {
+          position:'absolute', top:'20px', right:'24px', zIndex:'4',
+          display:'flex', flexDirection:'column', alignItems:'flex-end', gap:'0.4em',
+        });
+        ov.appendChild(legWrap);
+
+        const leg = document.createElement('div');
+        Object.assign(leg.style, {
+          fontFamily:"'Share Tech Mono',monospace", fontSize:'14px',
+          display:'grid', gridTemplateColumns:'repeat(8,1em)',
+          gap:'4px 6px', lineHeight:'1.4', textAlign:'center',
+        });
+        legWrap.appendChild(leg);
+
+        const applyAllColor = col => {
+          [preL, preR].forEach(p => {
+            p.style.color      = col;
+            p.style.textShadow = `0 0 8px ${col},0 0 20px ${col}80`;
+          });
+          applyIndexColor(col);
+        };
+
+        const legendSpans = VGA_COLORS.map(col => {
+          const s = document.createElement('span');
+          s.style.color  = col; s.style.cursor = 'pointer'; s.textContent = hrc();
+          s.addEventListener('click', () => { applyAllColor(col); });
+          leg.appendChild(s); return s;
+        });
+
+        _helpApplyText = applyAllColor;
+        helpCycleId = setInterval(() => {
+          legendSpans.forEach(s => s.textContent = hrc());
+          const bs = document.getElementById('help-btn-span');
+          if (bs) bs.textContent = hrb();
+        }, 140);
+      }
+
       document.body.appendChild(ov);
     }
 
@@ -872,10 +943,60 @@
     }
     document.addEventListener('mousemove', _resetIdle);
     document.addEventListener('mousedown', _resetIdle);
+    document.addEventListener('touchmove', _resetIdle,  { passive: true });
     _resetIdle();
 
+    // ── Mobile setup ──────────────────────────────────────────────
+    if (isMobile) {
+      document.querySelectorAll('.lbtn').forEach(b => b.style.display = 'none');
+      document.getElementById('abtn').style.display = 'none';
+      if (firstPane) setFocus(firstPane);
+    }
+
+    // ── Touch gesture controls ────────────────────────────────────
+    const touchOverlay = document.getElementById('touch-overlay');
+    if (isMobile) touchOverlay.style.display = 'block';
+
+    let _txStart = 0, _tyStart = 0, _ttStart = 0, _tcStart = 0;
+    touchOverlay.addEventListener('touchstart', e => {
+      _tcStart = e.touches.length;
+      _txStart = e.touches[0].clientX;
+      _tyStart = e.touches[0].clientY;
+      _ttStart = Date.now();
+      _resetIdle();
+    }, { passive: true });
+
+    touchOverlay.addEventListener('touchend', e => {
+      if (!e.changedTouches.length || !focusedPane) return;
+      const dx   = e.changedTouches[0].clientX - _txStart;
+      const dy   = e.changedTouches[0].clientY - _tyStart;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      // Tap → trigger
+      if (dist < 20 && Date.now() - _ttStart < 300) {
+        broadcastKey('key', { key: 't', shiftKey: false });
+        return;
+      }
+      if (dist < 40) return;
+      if (Math.abs(dx) > Math.abs(dy)) {
+        // Horizontal swipe → cycle visual
+        if (dx < 0) cycleViz(1); else cycleViz(-1);
+      } else {
+        // Vertical swipe → color cycle
+        const arrow = dy < 0 ? 'ArrowUp' : 'ArrowDown';
+        if (_tcStart >= 2) {
+          // Two-finger → UI color (C + Arrow)
+          helpCHeld = true;
+          broadcastKey('key', { key: arrow, shiftKey: false });
+          helpCHeld = false;
+        } else {
+          // One-finger → content color
+          broadcastKey('key', { key: arrow, shiftKey: false });
+        }
+      }
+    }, { passive: true });
+
     document.getElementById('statusbar').addEventListener('click', e => {
-      if (!e.target.closest('#hbtn') && !e.target.closest('#fbtn') && !e.target.closest('.lbtn') && !e.target.closest('#micbtn') && !e.target.closest('#abtn')) clearFocus();
+      if (!isMobile && !e.target.closest('#hbtn') && !e.target.closest('#fbtn') && !e.target.closest('.lbtn') && !e.target.closest('#micbtn') && !e.target.closest('#abtn')) clearFocus();
     });
   </script>
 </body>
