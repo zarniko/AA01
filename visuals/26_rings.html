@@ -245,53 +245,58 @@ function drawFrame(now, dt) {
     return project(pr, sc, ox, oy);
   });
 
-  // ── Render with 3-pass glow ──────────────────────────────────────
-  for (const pass of PASSES) {
-    ctx.save();
-    ctx.filter = pass.blur ? `blur(${pass.blur}px)` : 'none';
+  // ── Render — single pass with shadowBlur for glow ───────────────
+  // WKWebView renders ctx.filter blur passes as distinct thick strokes
+  // (blurred passes don't dissolve like in Chrome/Safari browser tabs).
+  // Using shadowBlur on a single crisp draw matches the intended look.
+  ctx.save();
 
-    // Cross at center
-    ctx.strokeStyle = lineColor;
-    ctx.globalAlpha = (0.5 + pulse * 0.25) * pass.alpha / 0.9;
-    ctx.lineWidth   = 1.2 * pass.width;
+  // Cross at center
+  ctx.strokeStyle = lineColor;
+  ctx.shadowBlur  = 8;
+  ctx.shadowColor = lineColor;
+  ctx.globalAlpha = 0.5 + pulse * 0.25;
+  ctx.lineWidth   = 1.0;
+  ctx.beginPath();
+  ctx.moveTo(crossEnds[0][0], crossEnds[0][1]);
+  ctx.lineTo(crossEnds[1][0], crossEnds[1][1]);
+  ctx.moveTo(crossEnds[2][0], crossEnds[2][1]);
+  ctx.lineTo(crossEnds[3][0], crossEnds[3][1]);
+  ctx.stroke();
+
+  // Dashed orbit rings
+  ctx.strokeStyle = lineColor;
+  ctx.lineCap     = 'round';
+  ctx.setLineDash([4, 6]);
+  ctx.lineDashOffset = -now * 0.012;
+
+  for (let ri = 0; ri < rings.length; ri++) {
+    const rp = ringPulses[ri];
+    ctx.globalAlpha = Math.min(1, 0.9 * (0.55 + rings[ri].norm * 0.45) + ampLevel * 0.08 + rp * 0.4);
+    ctx.lineWidth   = 1 + rp * 2.5;
+    ctx.shadowBlur  = 4 + rp * 8;
     ctx.beginPath();
-    ctx.moveTo(crossEnds[0][0], crossEnds[0][1]);
-    ctx.lineTo(crossEnds[1][0], crossEnds[1][1]);
-    ctx.moveTo(crossEnds[2][0], crossEnds[2][1]);
-    ctx.lineTo(crossEnds[3][0], crossEnds[3][1]);
+    const pts = ringPts[ri];
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i <= SEGS; i++) ctx.lineTo(pts[i][0], pts[i][1]);
     ctx.stroke();
-
-    // Dashed orbit rings
-    ctx.strokeStyle = lineColor;
-    ctx.lineWidth   = 1 * pass.width;
-    ctx.lineCap     = 'round';
-    ctx.setLineDash([4, 6]);
-    ctx.lineDashOffset = -now * 0.012;
-
-    for (let ri = 0; ri < rings.length; ri++) {
-      const rp = ringPulses[ri];
-      ctx.globalAlpha = Math.min(1, pass.alpha * (0.55 + rings[ri].norm * 0.45) + ampLevel * 0.08 + rp * 0.4);
-      ctx.lineWidth   = (1 + rp * 2.5) * pass.width;
-      ctx.beginPath();
-      const pts = ringPts[ri];
-      ctx.moveTo(pts[0][0], pts[0][1]);
-      for (let i = 1; i <= SEGS; i++) ctx.lineTo(pts[i][0], pts[i][1]);
-      ctx.stroke();
-    }
-
-    // Planet dots
-    ctx.fillStyle = lineColor;
-    for (let ri = 0; ri < rings.length; ri++) {
-      const rp = ringPulses[ri];
-      const dotR = (1.2 + rings[ri].dotNorm * 3.0 + rp * 2.0) * pass.width;
-      ctx.globalAlpha = Math.min(1, pass.alpha * (0.7 + rings[ri].norm * 0.3) + ampLevel * 0.12 + rp * 0.3);
-      ctx.beginPath();
-      ctx.arc(dotPts[ri][0], dotPts[ri][1], dotR, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    ctx.restore();
   }
+
+  // Planet dots
+  ctx.fillStyle  = lineColor;
+  ctx.setLineDash([]);
+  for (let ri = 0; ri < rings.length; ri++) {
+    const rp = ringPulses[ri];
+    const dotR = (1.2 + rings[ri].dotNorm * 3.0 + rp * 2.0) * 0.8;
+    ctx.globalAlpha = Math.min(1, 0.9 * (0.7 + rings[ri].norm * 0.3) + ampLevel * 0.12 + rp * 0.3);
+    ctx.shadowBlur  = 10 + rp * 10;
+    ctx.shadowColor = lineColor;
+    ctx.beginPath();
+    ctx.arc(dotPts[ri][0], dotPts[ri][1], dotR, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.restore();
 
   // ── Planet speed labels (4 left, 4 right) ───────────────────────
   ctx.setLineDash([]);
