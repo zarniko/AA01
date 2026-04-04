@@ -235,12 +235,14 @@
       const age = ts - edgeBirth.get(seedKey);
       // t: 0 = just born (fully dashed), 1 = fully solid
       const t = Math.min(1, age / DASH_DUR);
+      // deterministic curve sign from seed indices
+      const sign = ((ea + eb) % 2 === 0) ? 1 : -1;
 
       if (triIdxs.length === 2) {
         const c0 = centers[triIdxs[0]], c1 = centers[triIdxs[1]];
         if (!c0 || !c1) continue;
         const cl = clipLine(c0.x, c0.y, c1.x, c1.y);
-        if (cl) lines.push([...cl, t]);
+        if (cl) lines.push([...cl, t, sign]);
       } else if (triIdxs.length === 1) {
         const cc = centers[triIdxs[0]];
         if (!cc) continue;
@@ -255,7 +257,7 @@
         const len = Math.sqrt(nx * nx + ny * ny) || 1;
         const ext = Math.max(W, H) * 2;
         const cl = clipLine(cc.x, cc.y, cc.x + (nx / len) * ext, cc.y + (ny / len) * ext);
-        if (cl) lines.push([...cl, t]);
+        if (cl) lines.push([...cl, t, sign]);
       }
     }
 
@@ -275,6 +277,8 @@
   let colorIdx   = 10;
   let uiColorIdx = 10;
   let lastTs     = null;
+  const _nnCache = new Array(20).fill(0);
+  let _nnFrame   = 0;
 
   // ── Audio ────────────────────────────────────────────────────
   let analyser = null, timeDomain = null;
@@ -328,6 +332,35 @@
 
     ctx.clearRect(0, 0, W, H);
 
+    // ── Build vertex adjacency for smooth junctions ──────────
+    const vKey = (x, y) => `${x|0}_${y|0}`;
+    const vAdj = new Map();
+    for (const [x0,y0,x1,y1] of voronoiLines) {
+      const k0=vKey(x0,y0), k1=vKey(x1,y1);
+      if (!vAdj.has(k0)) vAdj.set(k0,[]);
+      if (!vAdj.has(k1)) vAdj.set(k1,[]);
+      vAdj.get(k0).push([x1,y1]);
+      vAdj.get(k1).push([x0,y0]);
+    }
+    // Control point at (vx,vy) for edge toward (wx,wy):
+    // tangent = opposite of average of other neighbor directions → smooth junction
+    function smoothCP(vx, vy, wx, wy, frac) {
+      const nbrs = vAdj.get(vKey(vx,vy)) || [];
+      const others = nbrs.filter(([nx,ny]) => Math.abs(nx-wx)>1 || Math.abs(ny-wy)>1);
+      const dx=wx-vx, dy=wy-vy;
+      const edgeLen = Math.sqrt(dx*dx+dy*dy)||1;
+      if (others.length === 0) return [vx+dx*frac, vy+dy*frac];
+      let ax=0, ay=0;
+      for (const [nx,ny] of others) {
+        const odx=nx-vx, ody=ny-vy, ol=Math.sqrt(odx*odx+ody*ody)||1;
+        ax+=odx/ol; ay+=ody/ol;
+      }
+      const al=Math.sqrt(ax*ax+ay*ay)||1;
+      let tx=-ax/al, ty=-ay/al;
+      if (tx*dx+ty*dy < 0) { tx=-tx; ty=-ty; }
+      return [vx+tx*edgeLen*frac, vy+ty*edgeLen*frac];
+    }
+
     // ── Three-pass glow render ───────────────────────────────
     const passes = [
       { blur: 14, alpha: 0.22, lw: 3.0 },
@@ -343,27 +376,16 @@
       ctx.lineWidth   = lw;
       ctx.globalAlpha = alpha;
 
-      // Draw solid edges
+      // Draw all edges
       ctx.setLineDash([]);
       ctx.beginPath();
-      for (const [x0, y0, x1, y1, t] of voronoiLines) {
-        if (t < 1) continue;
+      for (const [x0, y0, x1, y1] of voronoiLines) {
+        const [cp1x,cp1y] = smoothCP(x0,y0,x1,y1,0.35);
+        const [cp2x,cp2y] = smoothCP(x1,y1,x0,y0,0.35);
         ctx.moveTo(x0, y0);
-        ctx.lineTo(x1, y1);
+        ctx.bezierCurveTo(cp1x,cp1y,cp2x,cp2y,x1,y1);
       }
       ctx.stroke();
-
-      // Draw new edges as dashed
-      ctx.setLineDash([6, 4]);
-      ctx.lineDashOffset = -ts * 0.012;
-      ctx.beginPath();
-      for (const [x0, y0, x1, y1, t] of voronoiLines) {
-        if (t >= 1) continue;
-        ctx.moveTo(x0, y0);
-        ctx.lineTo(x1, y1);
-      }
-      ctx.stroke();
-      ctx.setLineDash([]);
 
       // Draw seed points
       ctx.globalAlpha = alpha * 0.5;
@@ -374,29 +396,36 @@
       }
     }
 
-    // ── Seed labels: nearest-neighbor distance ─────────────────
+    // ── Seed labels: nearest-neighbor distance (cached every 3 frames) ─────────────────
+    if (_nnFrame % 3 === 0) {
+      for (let i = 0; i < seeds.length; i++) {
+        let minD = Infinity;
+        for (let j = 0; j < seeds.length; j++) {
+          if (j === i) continue;
+          const dx = seeds[i].x - seeds[j].x, dy = seeds[i].y - seeds[j].y;
+          const d = Math.sqrt(dx * dx + dy * dy);
+          if (d < minD) minD = d;
+        }
+        _nnCache[i] = Math.round(minD);
+      }
+    }
+    _nnFrame++;
     ctx.font         = '14px "Share Tech Mono", monospace';
     ctx.textAlign    = 'center';
     ctx.textBaseline = 'bottom';
     ctx.fillStyle    = lineColor;
     ctx.shadowColor  = lineColor;
     for (let i = 0; i < seeds.length; i++) {
-      let minD = Infinity;
-      for (let j = 0; j < seeds.length; j++) {
-        if (j === i) continue;
-        const dx = seeds[i].x - seeds[j].x, dy = seeds[i].y - seeds[j].y;
-        const d = Math.sqrt(dx * dx + dy * dy);
-        if (d < minD) minD = d;
-      }
       const flicker = 0.35 + Math.random() * 0.45;
       ctx.globalAlpha = flicker;
       ctx.shadowBlur  = 4 + ampLevel * 6;
-      ctx.fillText(Math.round(minD), seeds[i].x, seeds[i].y - 8);
+      ctx.fillText(_nnCache[i], seeds[i].x, seeds[i].y - 8);
     }
 
     ctx.globalAlpha = 1;
     ctx.shadowBlur  = 0;
 
+    drawGrainFrame();
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
@@ -435,14 +464,11 @@
       data[i+3] = Math.random() * 30 | 0;
     }
     grainCx.putImageData(grainImg, 0, 0);
-    requestAnimationFrame(drawGrainFrame);
   }
   function toggleGrain() {
     grainOn = !grainOn;
-    if (grainOn) drawGrainFrame();
   }
   window.addEventListener('keydown', e => { if (e.key === 'g' || e.key === 'G') toggleGrain(); });
-  drawGrainFrame();
 
   // ── Mic toggle ──────────────────────────────────────────────
   const btn = document.getElementById('btn');
