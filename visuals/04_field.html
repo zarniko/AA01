@@ -99,12 +99,10 @@
   // ── Field parameters ─────────────────────────────────────────
   const N_LINES   = 14;     // field lines per charge
   const STEP      = 0.025;  // integration step (world units)
-  const MAX_STEPS = 180;    // max steps per line
+  const MAX_STEPS = 2000;   // max steps per line
   const START_R   = 0.12;   // starting radius from charge center
   const SEP_STEPS = [0.5, 1.0, 1.5, 2.2, 3.0];
   let   sepIdx    = 1;      // default: 1.0
-  const ARROW_INT = 90;     // steps between arrowheads
-  const ARROW_SZ  = 7;      // arrowhead size (px)
 
   // ── Field math ───────────────────────────────────────────────
   function fieldAt(x, y, charges) {
@@ -130,7 +128,7 @@
       x += dir * (fx / mag) * STEP;
       y += dir * (fy / mag) * STEP;
       pts.push([x, y]);
-      if (x*x + y*y > 25) break;  // off screen (r > 5)
+      if (x*x + y*y > 900) break; // stop at r > 30
       // stop if very close to any charge (line absorbed)
       for (const [cx, cy] of charges) {
         if ((x-cx)*(x-cx) + (y-cy)*(y-cy) < START_R * START_R) return pts;
@@ -143,6 +141,19 @@
   function project(x, y) {
     const s = Math.min(W, H) * 0.22;
     return [x * s + W/2, -y * s + H/2];
+  }
+
+  // ── Viewport segment clipping (Liang-Barsky) ─────────────────
+  function clipSeg(x0, y0, x1, y1) {
+    let t0 = 0, t1 = 1;
+    const dx = x1 - x0, dy = y1 - y0;
+    for (const [p, q] of [[-dx, x0], [dx, W - x0], [-dy, y0], [dy, H - y0]]) {
+      if (p === 0) { if (q < 0) return null; continue; }
+      const t = q / p;
+      if (p < 0) { if (t > t1) return null; if (t > t0) t0 = t; }
+      else        { if (t < t0) return null; if (t < t1) t1 = t; }
+    }
+    return [x0 + t0*dx, y0 + t0*dy, x0 + t1*dx, y0 + t1*dy];
   }
 
   // ── Cube helpers ─────────────────────────────────────────────
@@ -171,7 +182,6 @@
   let cubeAngle    = 0;
   let q2           = -1;      // always opposite: -1 or flipped via R
   let ampLevel     = 0;
-  let activeCrosses = [];
   let chargeNums   = [0, 0];
   let ampWasHigh  = false;   // for threshold edge detection
   const AMP_THRESH = 0.55;   // ampLevel threshold to trigger R
@@ -252,20 +262,8 @@
               hitCharge = true; break;
             }
           }
-          // dotted extension: continue tracing for same number of steps as original (2x total)
           const solidEnd = spts.length;
-          if (!hitCharge) {
-            let ex = lx, ey = ly;
-            for (let s = 0; s < pts.length; s++) {
-              const [fx, fy] = fieldAt(ex, ey, charges);
-              const mag = Math.sqrt(fx*fx + fy*fy);
-              if (mag < 1e-10) break;
-              ex += dir * (fx / mag) * STEP;
-              ey += dir * (fy / mag) * STEP;
-              spts.push(project(ex, ey));
-            }
-          }
-          allLines.push({ spts, solidEnd });
+          allLines.push({ spts, solidEnd, hitCharge });
           count++;
         }
       }
@@ -275,59 +273,70 @@
     ctx.strokeStyle = lineColor;
     ctx.shadowColor = lineColor;
 
-    const TAIL_FRAC = 0.28; // dotted tail = last 28% of solid portion
-
-    // Pass 1: glow — solid portion
+    // Pass 1: glow — solid connectors at charge endpoints
     ctx.shadowBlur  = 6 + ampLevel * 7;
     ctx.globalAlpha = 0.16;
     ctx.lineWidth   = 2.2;
     ctx.setLineDash([]);
     ctx.beginPath();
-    for (const {spts, solidEnd} of allLines) {
-      const tail = Math.floor(solidEnd * TAIL_FRAC);
-      const end  = solidEnd - tail;
-      ctx.moveTo(spts[0][0], spts[0][1]);
-      for (let k = 1; k < end; k++) ctx.lineTo(spts[k][0], spts[k][1]);
+    for (const {spts, solidEnd, hitCharge} of allLines) {
+      if (spts.length > 1) {
+        ctx.moveTo(spts[0][0], spts[0][1]);
+        ctx.lineTo(spts[1][0], spts[1][1]);
+      }
+      if (hitCharge && solidEnd >= 2) {
+        ctx.moveTo(spts[solidEnd-2][0], spts[solidEnd-2][1]);
+        ctx.lineTo(spts[solidEnd-1][0], spts[solidEnd-1][1]);
+      }
     }
     ctx.stroke();
 
-    // Pass 1b: glow — dotted tail + extension
-    ctx.setLineDash([2, 5]);
+    // Pass 1b: glow — clipped dashes, phase resets at screen re-entry
+    ctx.setLineDash([]);
     ctx.beginPath();
-    for (const {spts, solidEnd} of allLines) {
-      const tail  = Math.floor(solidEnd * TAIL_FRAC);
-      const start = solidEnd - tail - 1;
-      ctx.moveTo(spts[start][0], spts[start][1]);
-      for (let k = start + 1; k < spts.length; k++) ctx.lineTo(spts[k][0], spts[k][1]);
+    for (const {spts} of allLines) {
+      let phase = 0, wasOut = true;
+      for (let k = 0; k < spts.length - 1; k++) {
+        const seg = clipSeg(spts[k][0], spts[k][1], spts[k+1][0], spts[k+1][1]);
+        if (!seg) { wasOut = true; continue; }
+        if (wasOut) { phase = 0; wasOut = false; }
+        if (phase === 0) { ctx.moveTo(seg[0], seg[1]); ctx.lineTo(seg[2], seg[3]); }
+        phase = (phase + 1) % 3;
+      }
     }
     ctx.stroke();
 
-    // Pass 2: crisp solid
+    // Pass 2: crisp — solid connectors at charge endpoints
     ctx.shadowBlur  = 0;
     ctx.globalAlpha = 0.78;
     ctx.lineWidth   = 0.65;
     ctx.setLineDash([]);
     ctx.beginPath();
-    for (const {spts, solidEnd} of allLines) {
-      const tail = Math.floor(solidEnd * TAIL_FRAC);
-      const end  = solidEnd - tail;
-      ctx.moveTo(spts[0][0], spts[0][1]);
-      for (let k = 1; k < end; k++) ctx.lineTo(spts[k][0], spts[k][1]);
+    for (const {spts, solidEnd, hitCharge} of allLines) {
+      if (spts.length > 1) {
+        ctx.moveTo(spts[0][0], spts[0][1]);
+        ctx.lineTo(spts[1][0], spts[1][1]);
+      }
+      if (hitCharge && solidEnd >= 2) {
+        ctx.moveTo(spts[solidEnd-2][0], spts[solidEnd-2][1]);
+        ctx.lineTo(spts[solidEnd-1][0], spts[solidEnd-1][1]);
+      }
     }
     ctx.stroke();
 
-    // Pass 2b: crisp dotted tail + extension
-    ctx.setLineDash([2, 5]);
-    ctx.globalAlpha = 0.45;
+    // Pass 2b: crisp — clipped dashes, phase resets at screen re-entry
     ctx.beginPath();
-    for (const {spts, solidEnd} of allLines) {
-      const tail  = Math.floor(solidEnd * TAIL_FRAC);
-      const start = solidEnd - tail - 1;
-      ctx.moveTo(spts[start][0], spts[start][1]);
-      for (let k = start + 1; k < spts.length; k++) ctx.lineTo(spts[k][0], spts[k][1]);
+    for (const {spts} of allLines) {
+      let phase = 0, wasOut = true;
+      for (let k = 0; k < spts.length - 1; k++) {
+        const seg = clipSeg(spts[k][0], spts[k][1], spts[k+1][0], spts[k+1][1]);
+        if (!seg) { wasOut = true; continue; }
+        if (wasOut) { phase = 0; wasOut = false; }
+        if (phase === 0) { ctx.moveTo(seg[0], seg[1]); ctx.lineTo(seg[2], seg[3]); }
+        phase = (phase + 1) % 3;
+      }
     }
     ctx.stroke();
-    ctx.setLineDash([]);
 
     // Solid circles at line start points
     ctx.shadowColor = lineColor;
@@ -341,55 +350,6 @@
       ctx.fill();
     }
     ctx.shadowBlur = 0;
-
-    // Arrowheads — filled triangles or cross glitch
-    const arrowSlots = [];
-    for (const {spts} of allLines)
-      for (let k = ARROW_INT; k < spts.length - 2; k += ARROW_INT)
-        arrowSlots.push({spts, k});
-
-    // Maintain up to 4 persistent crosses, each lasting 1s
-    const now = Date.now();
-    activeCrosses = activeCrosses.filter(c => now < c.expiry);
-    while (activeCrosses.length < 8 && arrowSlots.length > 0) {
-      const slot = arrowSlots[Math.floor(Math.random() * arrowSlots.length)];
-      const [x, y] = slot.spts[slot.k];
-      activeCrosses.push({x, y, expiry: now + 1000});
-    }
-
-    ctx.shadowBlur  = 0;
-    ctx.fillStyle   = lineColor;
-    ctx.strokeStyle = lineColor;
-
-    // Draw crosses
-    ctx.globalAlpha = 1.0;
-    ctx.lineWidth   = 1.2;
-    for (const {x, y} of activeCrosses) {
-      ctx.beginPath();
-      ctx.moveTo(x - ARROW_SZ, y); ctx.lineTo(x + ARROW_SZ, y);
-      ctx.moveTo(x, y - ARROW_SZ); ctx.lineTo(x, y + ARROW_SZ);
-      ctx.stroke();
-    }
-
-    // Draw normal arrowheads
-    for (let i = 0; i < arrowSlots.length; i++) {
-      if (Math.random() < 0.35) continue;
-      const {spts, k} = arrowSlots[i];
-      const [x, y] = spts[k];
-      const [px, py] = spts[Math.max(0, k - 4)];
-      const dx = x - px, dy = y - py;
-      const len = Math.sqrt(dx*dx + dy*dy);
-      if (len < 0.5) continue;
-      const ux = dx/len, uy = dy/len;
-      const vx = -uy,    vy =  ux;
-      ctx.globalAlpha = 0.25 + Math.random() * 0.20;
-      ctx.beginPath();
-      ctx.moveTo(x, y);
-      ctx.lineTo(x - ux*ARROW_SZ - vx*ARROW_SZ*0.5, y - uy*ARROW_SZ - vy*ARROW_SZ*0.5);
-      ctx.lineTo(x - ux*ARROW_SZ + vx*ARROW_SZ*0.5, y - uy*ARROW_SZ + vy*ARROW_SZ*0.5);
-      ctx.closePath();
-      ctx.fill();
-    }
 
     // Charge indicators — rotating cubes
     ctx.strokeStyle  = lineColor;
@@ -405,9 +365,7 @@
       const pts    = drawCube(sx, sy, 19, cubeAngle);
       const top    = pts.reduce((a, b) => b[1] < a[1] ? b : a);
       const bottom = pts.reduce((a, b) => b[1] > a[1] ? b : a);
-      const anchor = ci === 0
-        ? (Math.random() < 0.1 ? bottom : top)
-        : (Math.random() < 0.1 ? top : bottom);
+      const anchor = ci === 0 ? top : bottom;
       const below  = anchor === bottom;
       const labelY = below ? anchor[1] + 10 : anchor[1] - 10;
       ctx.globalAlpha  = 0.85;
