@@ -298,13 +298,15 @@ function drawFrame(now, dt) {
 
   ctx.restore();
 
-  // ── Planet speed labels (4 left, 4 right) ───────────────────────
+  // ── Planet speed labels ──────────────────────────────────────────
+  // Narrow screen: labels above (inner 4) and below (outer 4) the visual
+  // Wide screen:   labels left and right as before
   ctx.setLineDash([]);
   ctx.font = "14px 'Share Tech Mono', monospace";
   ctx.letterSpacing = '3px';
-  const labelMargin = W * 0.18;
-  const labelSpacing = H * 0.06;
-  const labelTopY = oy - labelSpacing * 1.5;
+
+  const ringEdge = sc * BASE_R_MAX;  // pixel radius of outermost ring at equator
+  const narrowScreen = (W / 2 - ringEdge) < W * 0.14;
 
   for (let ri = 0; ri < N_RINGS; ri++) {
     const spd = Math.abs(orbSpeeds[ri] * speedMult);
@@ -312,17 +314,39 @@ function drawFrame(now, dt) {
     const jitter = baseVal < 2 ? Math.sin(now * 0.003 + ri * 1.7) * 1.5 + Math.sin(now * 0.0071 + ri * 3.1) * 0.8 : 0;
     const val = String(Math.min(99, Math.max(0, Math.round(baseVal + jitter)))).padStart(2, '0');
     const abbr = PLANETS[ri].name.slice(0, 2).toUpperCase();
-    const ly = labelTopY + (ri % 4) * labelSpacing;
 
     const rp = ringPulses[ri];
     ctx.globalAlpha = Math.min(1, 0.55 + rings[ri].norm * 0.35 + rp * 0.45);
     ctx.fillStyle = lineColor;
-    if (ri < 4) {
-      ctx.textAlign = 'left';
-      ctx.fillText(abbr + ' ' + val, labelMargin, ly);
+
+    if (narrowScreen) {
+      // 4 inner planets above center, 4 outer below center
+      // each group in 2 columns of 2
+      const isOuter = ri >= 4;
+      const groupIdx = ri % 4;
+      const colSpacing = W * 0.22;
+      const rowSpacing = H * 0.055;
+      const col = groupIdx % 2;
+      const row = Math.floor(groupIdx / 2);
+      const lx = ox + (col === 0 ? -colSpacing * 0.5 : colSpacing * 0.5);
+      const baseY = isOuter
+        ? oy + ringEdge * 0.72 + rowSpacing * 0.6
+        : oy - ringEdge * 0.72 - rowSpacing * 1.4;
+      const ly = baseY + row * rowSpacing;
+      ctx.textAlign = col === 0 ? 'right' : 'left';
+      ctx.fillText(abbr + ' ' + val, lx, ly);
     } else {
-      ctx.textAlign = 'right';
-      ctx.fillText(abbr + ' ' + val, W - labelMargin, ly);
+      const labelMargin = W * 0.18;
+      const labelSpacing = H * 0.06;
+      const labelTopY = oy - labelSpacing * 1.5;
+      const ly = labelTopY + (ri % 4) * labelSpacing;
+      if (ri < 4) {
+        ctx.textAlign = 'left';
+        ctx.fillText(abbr + ' ' + val, labelMargin, ly);
+      } else {
+        ctx.textAlign = 'right';
+        ctx.fillText(abbr + ' ' + val, W - labelMargin, ly);
+      }
     }
   }
 
