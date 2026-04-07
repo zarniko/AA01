@@ -41,7 +41,7 @@
       animation: blink 1s step-start infinite;
     }
 
-    #hbtn, #fbtn, #micbtn, #abtn, .lbtn {
+    #hbtn, #fbtn, #micbtn, #abtn, #cbtn, .lbtn {
       all: unset;
       font-family: 'Share Tech Mono', monospace;
       font-size: 14px;
@@ -50,7 +50,7 @@
       letter-spacing: 3px;
       cursor: pointer;
     }
-    #hbtn:hover, #fbtn:hover, #micbtn:hover, #abtn:hover, .lbtn:hover { opacity: 0.7; }
+    #hbtn:hover, #fbtn:hover, #micbtn:hover, #abtn:hover, #cbtn:hover, .lbtn:hover { opacity: 0.7; }
     .lbtn.selected { text-decoration: underline; text-underline-offset: 4px; opacity: 1; }
     #statusbar-right { display: flex; gap: 20px; align-items: center; transition: opacity 0.6s; }
     #statusbar.idle { border-top-color: transparent !important; }
@@ -144,6 +144,7 @@
     <div id="statusbar-right">
       <button id="abtn"   tabindex="-1">A</button>
       <button id="micbtn" tabindex="-1"></button>
+      <button id="cbtn"   tabindex="-1" style="display:none;opacity:0.4;">C</button>
       <button class="lbtn" tabindex="-1" data-layout="0">1</button>
       <button class="lbtn" tabindex="-1" data-layout="1">2</button>
       <button class="lbtn" tabindex="-1" data-layout="2">3</button>
@@ -209,7 +210,7 @@
       _idxColorStyle.textContent = `
         #idle-s { color:${col}!important; text-shadow:${sh}!important; }
         #help-esc-label { color:${col}!important; text-shadow:${sh}!important; }
-        #hbtn,#fbtn,#micbtn,#abtn,.lbtn { color:${col}!important; text-shadow:${sh}!important; }
+        #hbtn,#fbtn,#micbtn,#abtn,#cbtn,.lbtn { color:${col}!important; text-shadow:${sh}!important; }
         .lbtn.selected { color:${col}!important; }
         .focus-s { color:${col}!important; text-shadow:${sh}!important; }
         #statusbar { border-top-color:rgba(${r},${g},${b},0.08)!important; }
@@ -950,6 +951,7 @@
     if (isMobile) {
       document.querySelectorAll('.lbtn').forEach(b => b.style.display = 'none');
       document.getElementById('abtn').style.display = 'none';
+      document.getElementById('cbtn').style.display = 'inline-block';
       if (firstPane) setFocus(firstPane);
     }
 
@@ -958,6 +960,12 @@
     if (isMobile) touchOverlay.style.display = 'block';
 
     let _txStart = 0, _tyStart = 0, _ttStart = 0, _tcStart = 0;
+    let _cSticky = false;
+    const _cbtn = document.getElementById('cbtn');
+    _cbtn.addEventListener('click', () => {
+      _cSticky = !_cSticky;
+      _cbtn.style.opacity = _cSticky ? '1' : '0.4';
+    });
     touchOverlay.addEventListener('touchstart', e => {
       _tcStart = e.touches.length;
       _txStart = e.touches[0].clientX;
@@ -983,14 +991,14 @@
       } else {
         // Vertical swipe → color cycle
         const arrow = dy < 0 ? 'ArrowUp' : 'ArrowDown';
-        if (_tcStart >= 2) {
-          // Two-finger → UI color (C + Arrow)
+        if (_cSticky) {
+          // C bright → content/visual color
+          broadcastKey('key', { key: arrow, shiftKey: false });
+        } else {
+          // C dimmed (default) → visual UI chrome color
           helpCHeld = true;
           broadcastKey('key', { key: arrow, shiftKey: false });
           helpCHeld = false;
-        } else {
-          // One-finger → content color
-          broadcastKey('key', { key: arrow, shiftKey: false });
         }
       }
     }, { passive: true });
