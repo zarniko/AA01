@@ -140,17 +140,16 @@
     const GCOLS = 8, GROWS = 4;  // fixed cell count, same as ASCII version
     let CW = 0, CH = 0;          // cell width/height in px (computed from viewport)
 
-    // 8 surrounding offsets (in cell-fraction units)
+    const RING_DELAY = 120; // ms between rings
     const OFFSETS = [[-1,-1],[0,-1],[1,-1],[-1,0],[1,0],[-1,1],[0,1],[1,1]];
-    const STEP_F  = 0.22; // fraction of cell for each offset step
+    const STEP_F  = 0.22;
 
     // Center dot flicker state: alpha per cell, randomized each 140ms
     let centerAlpha = [];
     let lastFlicker = 0;
 
-    // Active highlight dots: { x, y, color, start, expiry }
+    // Active highlight crosses: { x, y, color, start, expiry }
     let segments = [];
-    const occupied = new Set(); // "ci,ri,dx,dy"
 
     function initCenterAlpha() {
       centerAlpha = [];
@@ -176,7 +175,6 @@
       ctx.fillRect(0, 0, W, H);
 
       flickerCenters(now);
-      segments = segments.filter(s => now < s.expiry);
 
       const [baseR, baseG, baseB] = hexRGB(lineColor);
 
@@ -265,24 +263,30 @@
     }
 
     // ── Trigger ────────────────────────────────────────────────────
-    function triggerSegment() {
-      const now   = performance.now();
+    function triggerRipple() {
       const color = getAnalogous(lineColor);
       const ci0   = Math.floor(Math.random() * GCOLS);
       const ri0   = Math.floor(Math.random() * GROWS);
-      const cx0   = (ci0 + 0.5) * CW;
-      const cy0   = (ri0 + 0.5) * CH;
+      const maxR  = Math.max(ci0, GCOLS - 1 - ci0, ri0, GROWS - 1 - ri0);
 
-      const avail = OFFSETS.filter(([dx, dy]) => !occupied.has(`${ci0},${ri0},${dx},${dy}`));
-      if (avail.length === 0) return;
-      const [dx, dy] = avail[Math.floor(Math.random() * avail.length)];
-      const key = `${ci0},${ri0},${dx},${dy}`;
-      occupied.add(key);
-      const x = cx0 + dx * CW * STEP_F;
-      const y = cy0 + dy * CH * STEP_F;
-      const seg = { x, y, color, start: now, expiry: now + 4000 };
-      segments.push(seg);
-      setTimeout(() => { segments = segments.filter(s => s !== seg); occupied.delete(key); }, 4000);
+      for (let r = 0; r <= maxR; r++) {
+        const delay = r * RING_DELAY;
+        for (let ci = 0; ci < GCOLS; ci++) {
+          for (let ri = 0; ri < GROWS; ri++) {
+            if (Math.max(Math.abs(ci - ci0), Math.abs(ri - ri0)) !== r) continue;
+            const [dx, dy] = OFFSETS[Math.floor(Math.random() * OFFSETS.length)];
+            const x = (ci + 0.5) * CW + dx * CW * STEP_F;
+            const y = (ri + 0.5) * CH + dy * CH * STEP_F;
+            setTimeout(() => {
+              const start  = performance.now();
+              const expiry = start + 1800;
+              const seg = { x, y, color, start, expiry };
+              segments.push(seg);
+              setTimeout(() => { segments = segments.filter(s => s !== seg); }, 1800);
+            }, delay);
+          }
+        }
+      }
     }
 
     // ── Grain ──────────────────────────────────────────────────────
@@ -316,12 +320,12 @@
         }
         const rms = Math.sqrt(sumSq / timeDomain.length);
         ampLevel = ampLevel * 0.82 + rms * 0.18;
-        if (rms > 0.04 && !ampWasHigh) { triggerSegment(); ampWasHigh = true; }
+        if (rms > 0.04 && !ampWasHigh) { triggerRipple(); ampWasHigh = true; }
         if (rms < 0.024) ampWasHigh = false;
       } else if (parentAudio) {
         const rms = parentAudio.rms || 0;
         ampLevel = ampLevel * 0.90 + rms * 0.10;
-        if (rms > 0.04 && !ampWasHigh) { triggerSegment(); ampWasHigh = true; }
+        if (rms > 0.04 && !ampWasHigh) { triggerRipple(); ampWasHigh = true; }
         if (rms < 0.024) ampWasHigh = false;
       } else {
         ampLevel *= 0.95;
@@ -388,7 +392,7 @@
     window.addEventListener('keydown', e => {
       if (e.isTrusted) window.parent?.postMessage({ type: 'childKey', key: e.key, shiftKey: !!e.shiftKey }, '*');
       if (e.key === 'c' || e.key === 'C') { cHeld = true; return; }
-      if (e.key === 't' || e.key === 'T') { triggerSegment(); return; }
+      if (e.key === 't' || e.key === 'T') { triggerRipple(); return; }
       if (e.key === 'ArrowLeft' || e.key === '<') {
         cycleMs = Math.min(560, cycleMs + 140);
       } else if (e.key === 'ArrowRight' || e.key === '>') {
@@ -417,10 +421,10 @@
       if (e.key === 'c' || e.key === 'C') cHeld = false;
     });
 
-    document.getElementById('tkey').addEventListener('click', triggerSegment);
+    document.getElementById('tkey').addEventListener('click', triggerRipple);
     document.getElementById('slower').addEventListener('click', () => cycleMs = Math.min(560, cycleMs + 140));
     document.getElementById('faster').addEventListener('click', () => cycleMs = Math.max(140, cycleMs - 140));
-    canvas.addEventListener('click', triggerSegment);
+    canvas.addEventListener('click', triggerRipple);
 
     // ── postMessage bridge ─────────────────────────────────────────
     window.addEventListener('message', e => {
