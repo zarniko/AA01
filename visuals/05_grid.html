@@ -103,8 +103,9 @@
     let cHeld      = false;
     let ampLevel   = 0;
     let ampWasHigh = false;
-    let micActive  = false, micStream = null, audioCtx = null, analyser = null, timeDomain = null;
+    let micActive  = false, micStream = null, audioCtx = null, analyser = null, timeDomain = null, freqDomain = null;
     let parentAudio = null;
+    let activeFreq  = null;
 
     const btn   = document.getElementById('btn');
     const opsEl = document.getElementById('ops');
@@ -148,8 +149,32 @@
     let centerAlpha = [];
     let lastFlicker = 0;
 
-    // Active highlight crosses: { x, y, color, start, expiry }
+    // Active highlight chars: { x, y, color, char, start, expiry }
     let segments = [];
+
+    // Diagonal dotted lines across 4 random cells at a time
+    let diagCells = [];
+    function pickDiagCells() {
+      const blocked = new Set();
+      diagCells = [];
+      let attempts = 0;
+      while (diagCells.length < 3 && attempts < 200) {
+        attempts++;
+        const ci = 1 + Math.floor(Math.random() * (GCOLS - 2)); // cols 1–6
+        const ri = 1 + Math.floor(Math.random() * (GROWS - 2)); // rows 1–2
+        const key = ri * GCOLS + ci;
+        if (blocked.has(key)) continue;
+        // Block this cell and all 8 neighbours
+        for (let dr = -1; dr <= 1; dr++)
+          for (let dc = -1; dc <= 1; dc++) {
+            const nr = ri + dr, nc = ci + dc;
+            if (nr >= 0 && nr < GROWS && nc >= 0 && nc < GCOLS)
+              blocked.add(nr * GCOLS + nc);
+          }
+        diagCells.push({ ci, ri, dir: Math.random() < 0.5 ? 0 : 1 });
+      }
+    }
+    setInterval(pickDiagCells, 2500);
 
     function initCenterAlpha() {
       centerAlpha = [];
@@ -176,6 +201,22 @@
 
       flickerCenters(now);
 
+      // Per-cell frequency energy (log-spaced bins → 32 cells)
+      const N_CELLS = GCOLS * GROWS;
+      const cellE = new Float32Array(N_CELLS);
+      if (activeFreq && activeFreq.length) {
+        const logMin = Math.log(2);
+        const logMax = Math.log(Math.min(256, activeFreq.length - 1));
+        for (let i = 0; i < N_CELLS; i++) {
+          const t0 = i / N_CELLS, t1 = (i + 1) / N_CELLS;
+          const b0 = Math.round(Math.exp(logMin + t0 * (logMax - logMin)));
+          const b1 = Math.round(Math.exp(logMin + t1 * (logMax - logMin)));
+          let sum = 0, cnt = 0;
+          for (let b = b0; b <= b1 && b < activeFreq.length; b++) { sum += activeFreq[b]; cnt++; }
+          cellE[i] = cnt ? sum / (cnt * 255) : 0;
+        }
+      }
+
       const [baseR, baseG, baseB] = hexRGB(lineColor);
 
       // ── Pass 1: glow ──────────────────────────────────────────
@@ -185,39 +226,50 @@
 
       // Grid lines
       ctx.strokeStyle = lineColor;
-      ctx.globalAlpha = 0.18;
+      ctx.globalAlpha = 0.18 + ampLevel * 0.25;
       ctx.lineWidth   = 1.0;
       ctx.beginPath();
       for (let ci = 0; ci <= GCOLS; ci++) { ctx.moveTo(ci * CW, 0); ctx.lineTo(ci * CW, H); }
       for (let ri = 0; ri <= GROWS; ri++) { ctx.moveTo(0, ri * CH); ctx.lineTo(W, ri * CH); }
       ctx.stroke();
 
-      // Center dots
+      // Center dots — radius and alpha driven by per-cell frequency energy
       for (let ri = 0; ri < GROWS; ri++) {
         for (let ci = 0; ci < GCOLS; ci++) {
           const cx = (ci + 0.5) * CW, cy = (ri + 0.5) * CH;
-          ctx.globalAlpha = centerAlpha[ri]?.[ci] * 0.20 ?? 0.10;
+          const e = cellE[ri * GCOLS + ci];
+          ctx.globalAlpha = Math.min(1, (centerAlpha[ri]?.[ci] ?? 0.5) * 0.20 + e * 0.45);
           ctx.fillStyle   = lineColor;
           ctx.beginPath(); ctx.arc(cx, cy, 2.2, 0, Math.PI * 2); ctx.fill();
         }
       }
 
-      // Highlight crosses — glow pass
-      const cs = Math.min(CW, CH) * 0.09;
-      ctx.lineWidth = 2.2;
+      // Diagonals — glow pass
+      ctx.save();
+      ctx.shadowColor = lineColor;
+      ctx.strokeStyle = lineColor;
+      ctx.lineWidth   = 1.0;
+      for (const { ci, ri, dir } of diagCells) {
+        const de = cellE[ri * GCOLS + ci];
+        const x0 = ci * CW + (dir === 0 ? 0 : CW), y0 = ri * CH;
+        const x1 = ci * CW + (dir === 0 ? CW : 0),  y1 = (ri + 1) * CH;
+        ctx.globalAlpha = 0.12 + de * 0.55;
+        ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+      }
+      ctx.restore();
+
+      // Highlight chars — glow pass
+      ctx.font = `14px 'Share Tech Mono', monospace`;
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
       for (const s of segments) {
         const age = (now - s.start) / (s.expiry - s.start);
         const env = age < 0.07 ? age / 0.07 : age > 0.82 ? (1 - age) / 0.18 : 1.0;
         const [sr, sg, sb] = hexRGB(s.color);
-        ctx.shadowColor   = s.color;
-        ctx.strokeStyle   = `rgb(${sr},${sg},${sb})`;
-        ctx.globalAlpha   = 0.18 * env;
-        ctx.save();
-        const angle = age < 0.07 ? (Math.PI / 4) * (1 - age / 0.07) : 0;
-        ctx.translate(s.x, s.y); ctx.rotate(angle);
-        ctx.beginPath(); ctx.moveTo(-cs, 0); ctx.lineTo(cs, 0); ctx.moveTo(0, -cs); ctx.lineTo(0, cs);
-        ctx.stroke();
-        ctx.restore();
+        ctx.shadowColor = s.color;
+        ctx.fillStyle   = `rgb(${sr},${sg},${sb})`;
+        ctx.globalAlpha = 0.18 * env;
+        ctx.fillText(s.char, s.x, s.y);
       }
       ctx.restore();
 
@@ -227,37 +279,48 @@
 
       // Grid lines
       ctx.strokeStyle = lineColor;
-      ctx.globalAlpha = 0.32;
+      ctx.globalAlpha = 0.32 + ampLevel * 0.30;
       ctx.lineWidth   = 0.6;
       ctx.beginPath();
       for (let ci = 0; ci <= GCOLS; ci++) { ctx.moveTo(ci * CW, 0); ctx.lineTo(ci * CW, H); }
       for (let ri = 0; ri <= GROWS; ri++) { ctx.moveTo(0, ri * CH); ctx.lineTo(W, ri * CH); }
       ctx.stroke();
 
-      // Center dots
+      // Center dots — radius and alpha driven by per-cell frequency energy
       for (let ri = 0; ri < GROWS; ri++) {
         for (let ci = 0; ci < GCOLS; ci++) {
           const cx = (ci + 0.5) * CW, cy = (ri + 0.5) * CH;
-          ctx.globalAlpha = centerAlpha[ri]?.[ci] * 0.70 ?? 0.40;
+          const e = cellE[ri * GCOLS + ci];
+          ctx.globalAlpha = Math.min(1, (centerAlpha[ri]?.[ci] ?? 0.5) * 0.70 + e * 0.60);
           ctx.fillStyle   = lineColor;
           ctx.beginPath(); ctx.arc(cx, cy, 1.4, 0, Math.PI * 2); ctx.fill();
         }
       }
 
-      // Highlight crosses — sharp pass
-      ctx.lineWidth = 0.8;
+      // Diagonals — sharp pass
+      ctx.save();
+      ctx.strokeStyle = lineColor;
+      ctx.lineWidth   = 0.6;
+      for (const { ci, ri, dir } of diagCells) {
+        const de = cellE[ri * GCOLS + ci];
+        const x0 = ci * CW + (dir === 0 ? 0 : CW), y0 = ri * CH;
+        const x1 = ci * CW + (dir === 0 ? CW : 0),  y1 = (ri + 1) * CH;
+        ctx.globalAlpha = 0.20 + de * 0.65;
+        ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+      }
+      ctx.restore();
+
+      // Highlight chars — sharp pass
+      ctx.font = `14px 'Share Tech Mono', monospace`;
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
       for (const s of segments) {
         const age = (now - s.start) / (s.expiry - s.start);
         const env = age < 0.07 ? age / 0.07 : age > 0.82 ? (1 - age) / 0.18 : 1.0;
         const [sr, sg, sb] = hexRGB(s.color);
-        ctx.strokeStyle = `rgb(${sr},${sg},${sb})`;
+        ctx.fillStyle   = `rgb(${sr},${sg},${sb})`;
         ctx.globalAlpha = 0.28 * env;
-        ctx.save();
-        const angle = age < 0.07 ? (Math.PI / 4) * (1 - age / 0.07) : 0;
-        ctx.translate(s.x, s.y); ctx.rotate(angle);
-        ctx.beginPath(); ctx.moveTo(-cs, 0); ctx.lineTo(cs, 0); ctx.moveTo(0, -cs); ctx.lineTo(0, cs);
-        ctx.stroke();
-        ctx.restore();
+        ctx.fillText(s.char, s.x, s.y);
       }
       ctx.restore();
     }
@@ -280,7 +343,7 @@
             setTimeout(() => {
               const start  = performance.now();
               const expiry = start + 1800;
-              const seg = { x, y, color, start, expiry };
+              const seg = { x, y, color, char: String.fromCodePoint(0x2801 + Math.floor(Math.random() * 64)), start, expiry };
               segments.push(seg);
               setTimeout(() => { segments = segments.filter(s => s !== seg); }, 1800);
             }, delay);
@@ -314,6 +377,8 @@
     function frame(now) {
       if (micActive && analyser) {
         analyser.getByteTimeDomainData(timeDomain);
+        analyser.getByteFrequencyData(freqDomain);
+        activeFreq = freqDomain;
         let sumSq = 0;
         for (let i = 0; i < timeDomain.length; i++) {
           const d = timeDomain[i] / 255 - 0.5; sumSq += d * d;
@@ -323,11 +388,13 @@
         if (rms > 0.04 && !ampWasHigh) { triggerRipple(); ampWasHigh = true; }
         if (rms < 0.024) ampWasHigh = false;
       } else if (parentAudio) {
+        activeFreq = parentAudio.freqData || null;
         const rms = parentAudio.rms || 0;
         ampLevel = ampLevel * 0.90 + rms * 0.10;
         if (rms > 0.04 && !ampWasHigh) { triggerRipple(); ampWasHigh = true; }
         if (rms < 0.024) ampWasHigh = false;
       } else {
+        activeFreq = null;
         ampLevel *= 0.95;
       }
 
@@ -371,8 +438,8 @@
       if (micActive) {
         micStream?.getTracks().forEach(t => t.stop());
         audioCtx?.close();
-        micStream = audioCtx = analyser = timeDomain = null;
-        micActive = false; ampLevel = 0;
+        micStream = audioCtx = analyser = timeDomain = freqDomain = null;
+        activeFreq = null; micActive = false; ampLevel = 0;
         return;
       }
       try {
@@ -384,6 +451,7 @@
         analyser.smoothingTimeConstant = 0.6;
         src.connect(analyser);
         timeDomain = new Uint8Array(analyser.fftSize);
+        freqDomain = new Uint8Array(analyser.frequencyBinCount);
         micActive  = true;
       } catch {}
     });
@@ -457,6 +525,7 @@
       if (_sp) _sp.style.color = _uc;
     })();
 
+    pickDiagCells();
     resize();
     requestAnimationFrame(frame);
   </script>
