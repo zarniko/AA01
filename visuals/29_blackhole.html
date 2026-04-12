@@ -386,14 +386,16 @@
     }
 
     // ── Grain ────────────────────────────────────────────────────
+    let _grainImg = null;
     function drawGrainFrame() {
-      const id = gCtx.createImageData(W, H);
-      const d  = id.data;
+      if (!_grainImg || _grainImg.width !== W || _grainImg.height !== H)
+        _grainImg = gCtx.createImageData(W, H);
+      const d  = _grainImg.data;
       for (let i = 0; i < d.length; i += 4) {
         const v = (Math.random() * 255) | 0;
         d[i] = d[i+1] = d[i+2] = v; d[i+3] = 25;
       }
-      gCtx.putImageData(id, 0, 0);
+      gCtx.putImageData(_grainImg, 0, 0);
     }
 
     // ── Resize ───────────────────────────────────────────────────
@@ -438,6 +440,7 @@
           document.getElementById('ckey').style.color   = col;
           document.getElementById('tgkeys').style.color = col;
           document.getElementById('speed').style.color  = col;
+          uiColorIdx = VGA.indexOf(col);
         } else {
           lineColor = col; colorIdx = VGA.indexOf(col);
         }
