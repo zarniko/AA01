@@ -136,11 +136,27 @@
   // ── State ────────────────────────────────────────────────────
   let reverseUntil = 0;
   let lastFlipTime = 0;
+  let partVelBoost = 1.0;
   let ampLevel     = 0;
   let lineColor    = '#39ff14';
   let colorIdx     = 10;
   let uiColorIdx   = 10;
   let lastTs       = null;
+
+  // ── Axis particles ───────────────────────────────────────────
+  const PART_N = 120;
+  const parts  = [];
+  (function() {
+    for (let i = 0; i < PART_N; i++) parts.push({
+      y:        2.6 - Math.random() * 5.2,
+      phi:      Math.random() * Math.PI * 2,
+      r0:       1.2 + Math.random() * 1.4,
+      rMin:     0.18 + Math.random() * 0.14,
+      spd:      0.6 + Math.random() * 0.5,
+      omegaPhi: (Math.random() - 0.5) * 2.2,
+      phase:    Math.random() * Math.PI * 2,
+    });
+  })();
 
   let analyser = null, timeDomain = null;
   let micActive = false, micStream = null, audioCtx = null;
@@ -163,12 +179,12 @@
         rms = Math.sqrt(sq / timeDomain.length);
       } else { rms = parentAudio.rms; }
       ampLevel += (rms * 3 - ampLevel) * 0.1;
-      if (rms > 0.04) triggerReverse();
+      if (rms > 0.04) triggerParticles();
     } else {
       ampLevel *= 0.95;
     }
 
-    const reversed = ts < reverseUntil;
+    const reversed = performance.now() < reverseUntil;
     const omega = 0.45 + ampLevel * 1.5;
     angle += (reversed ? -omega : omega) * dt;
 
@@ -197,14 +213,14 @@
 
     // Pass 1: glow
     ctx.shadowBlur  = 10;
-    ctx.globalAlpha = 0.20;
+    ctx.globalAlpha = 0.18;
     ctx.lineWidth   = 2.2;
     buildPath();
     ctx.stroke();
 
     // Pass 2: crisp
     ctx.shadowBlur  = 0;
-    ctx.globalAlpha = 0.85;
+    ctx.globalAlpha = 0.80;
     ctx.lineWidth   = 0.65;
     buildPath();
     ctx.stroke();
@@ -212,8 +228,8 @@
     // Axis line through the donut hole (Y axis in object space)
     const pAxisTop = project(toView([0,  2.6, 0]));
     const pAxisBot = project(toView([0, -2.6, 0]));
-    ctx.strokeStyle = lineColor;
-    ctx.shadowColor = lineColor;
+    ctx.strokeStyle = VGA[uiColorIdx];
+    ctx.shadowColor = VGA[uiColorIdx];
     ctx.shadowBlur  = 6;
     ctx.globalAlpha = 0.42;
     ctx.lineWidth   = 0.6;
@@ -226,24 +242,84 @@
     ctx.setLineDash([]);
     ctx.lineDashOffset = 0;
 
-    ctx.globalAlpha = 1;
-    ctx.shadowBlur  = 0;
+    // ── Axis particles ─────────────────────────────────────────
+    partVelBoost = Math.max(1.0, partVelBoost * 0.97);
+    const pSpd = (0.85 + ampLevel * 1.4) * partVelBoost * dt;
+    for (const p of parts) {
+      // Poiseuille: outer particles slower (parabolic velocity profile)
+      const velFactor = 1 - 0.5 * Math.pow(p.r0 / 2.6, 1.5);
+      p.y   -= p.spd * pSpd * velFactor;
+      // Helical rotation around axis
+      p.phi += p.omegaPhi * dt * partVelBoost;
+      if (p.y < -2.6) {
+        p.y = 2.6; p.phi = Math.random() * Math.PI * 2;
+        p.r0 = 1.2 + Math.random() * 1.4; p.rMin = 0.18 + Math.random() * 0.14;
+        p.omegaPhi = (Math.random() - 0.5) * 2.2; p.phase = Math.random() * Math.PI * 2;
+      }
+    }
+
+    ctx.shadowColor = VGA[uiColorIdx];
+    ctx.fillStyle   = VGA[uiColorIdx];
+
+    // Glow pass
+    ctx.shadowBlur = 10;
+    for (const p of parts) {
+      const t    = Math.abs(p.y) / 2.6;
+      const fade = Math.min(1, Math.min(2.6 - p.y, p.y + 2.6) / 0.85);
+      const rOsc = 0.07 * Math.sin(p.phase + p.y * 2.8);
+      const r    = Math.max(0, p.rMin + (p.r0 - p.rMin) * t + rOsc);
+      const [sx, sy] = project(toView([r * Math.cos(p.phi), p.y, r * Math.sin(p.phi)]));
+      ctx.globalAlpha = (0.20 + 0.50 * t) * fade * 0.55;
+      ctx.beginPath(); ctx.arc(sx, sy, 1.5, 0, Math.PI * 2); ctx.fill();
+    }
+    // Crisp pass
+    ctx.shadowBlur = 0;
+    for (const p of parts) {
+      const t    = Math.abs(p.y) / 2.6;
+      const fade = Math.min(1, Math.min(2.6 - p.y, p.y + 2.6) / 0.85);
+      const rOsc = 0.07 * Math.sin(p.phase + p.y * 2.8);
+      const r    = Math.max(0, p.rMin + (p.r0 - p.rMin) * t + rOsc);
+      const [sx, sy] = project(toView([r * Math.cos(p.phi), p.y, r * Math.sin(p.phi)]));
+      ctx.globalAlpha = (0.30 + 0.70 * t) * fade;
+      ctx.beginPath(); ctx.arc(sx, sy, 0.9, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // Tip counts
+    const topCount = parts.filter(p => p.y >  1.75).length;
+    const botCount = parts.filter(p => p.y < -1.75).length;
+    ctx.font         = '14px "Share Tech Mono", monospace';
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle    = VGA[uiColorIdx];
+    ctx.shadowColor  = VGA[uiColorIdx];
+    ctx.shadowBlur   = 6;
+    ctx.globalAlpha  = 0.75;
+    ctx.fillText(String(topCount).padStart(2, '0'), pAxisTop[0], pAxisTop[1] - 14);
+    ctx.fillText(String(botCount).padStart(2, '0'), pAxisBot[0], pAxisBot[1] + 14);
+
+    ctx.globalAlpha  = 1;
+    ctx.shadowBlur   = 0;
+    ctx.textBaseline = 'alphabetic';
 
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
 
   // ── R key: reverse spin ──────────────────────────────────────
+  function triggerParticles() {
+    partVelBoost = 3.0 + Math.random() * 2.5;
+  }
   function triggerReverse() {
     const now = performance.now();
-    if (now - lastFlipTime < 300) return;
+    if (now - lastFlipTime < 10000) return;
     lastFlipTime = now;
-    const dur = [500, 1000, 1500, 2000][Math.floor(Math.random() * 4)];
-    reverseUntil = now < reverseUntil ? 0 : now + dur;
+    const dur = [2000, 3000, 4000][Math.floor(Math.random() * 3)];
+    reverseUntil = now + dur;
+    triggerParticles();
   }
-  window.addEventListener('keydown', e => { if (e.key === 't' || e.key === 'T') triggerReverse(); });
-  document.getElementById('rkey').addEventListener('click', triggerReverse);
-  canvas.addEventListener('click', triggerReverse);
+  window.addEventListener('keydown', e => { if (e.key === 't' || e.key === 'T') { triggerReverse(); triggerParticles(); } });
+  document.getElementById('rkey').addEventListener('click', () => { triggerReverse(); triggerParticles(); });
+  canvas.addEventListener('click', () => { triggerReverse(); triggerParticles(); });
 
   // ── Grain ───────────────────────────────────────────────────
   let grainOn = true;
@@ -320,6 +396,7 @@
     s.style.color = col; s.style.cursor = 'pointer'; s.textContent = rc();
     s.addEventListener('click', () => {
       if (cHeld) {
+        uiColorIdx = VGA.indexOf(col);
         btn.style.color    = col; opsEl.style.color  = col; zkoEl.style.color = col;
         document.getElementById('ckey').style.color   = col;
         document.getElementById('rgkeys').style.color = col;
