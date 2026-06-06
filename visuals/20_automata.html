@@ -230,7 +230,7 @@
 
   // ── Flares ────────────────────────────────────────────────
   const flares = [];
-  const MAX_FLARES = 18;
+  const MAX_FLARES = 14;
 
   function mkFlare() {
     const theta = Math.random() * Math.PI * 2;
@@ -511,18 +511,8 @@
     }
     while (flares.length < MAX_FLARES) flares.push(mkFlare());
 
-    // Composite flares: wide soft halo + tight glow + sharp
-    ctx.save();
-    ctx.filter = 'blur(18px)';
-    ctx.globalAlpha = 0.30;
+    // Composite flares: direct composite, no blur
     ctx.drawImage(_offCv, 0, 0);
-    ctx.filter = 'blur(7px)';
-    ctx.globalAlpha = 0.52;
-    ctx.drawImage(_offCv, 0, 0);
-    ctx.filter = 'none';
-    ctx.globalAlpha = 1;
-    ctx.drawImage(_offCv, 0, 0);
-    ctx.restore();
 
     // Axis lines with tip labels at half of flare origins
     ctx.save();
