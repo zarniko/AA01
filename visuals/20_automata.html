@@ -298,8 +298,10 @@
   let lastTs = null;
 
   function frame(ts) {
-    if (!lastTs) lastTs = ts;
-    const dt = Math.min((ts - lastTs) / 1000, 0.05);
+    if (!lastTs) { lastTs = ts; requestAnimationFrame(frame); return; }
+    const elapsed = ts - lastTs;
+    if (elapsed < 15) { requestAnimationFrame(frame); return; } // cap ~66fps, halves work on 120Hz
+    const dt = Math.min(elapsed / 1000, 0.05);
     lastTs = ts;
     sphereRot += dt * 0.12;
 
@@ -451,18 +453,22 @@
       const lifeT = (now - f.born) / f.maxLife;
       if (lifeT >= 1) { flares.splice(fi, 1); continue; }
       const env = Math.min(1, lifeT * 4) * Math.min(1, (1 - lifeT) * 4);
+      const ampBoost1 = 1 + ampLevel * 1.8;
+      const ampBoost2 = 1 + ampLevel * 0.8;
       for (const p of f.particles) {
         p.t = (p.t + p.spd * dt * speedMult * (1 + ampLevel * 1.5)) % 1;
-        const px = bezPt(p.t, f.bx, f.p1x, f.p2x, f.ex);
-        const py = bezPt(p.t, f.by, f.p1y, f.p2y, f.ey);
         const ht    = f.isLoop ? Math.sin(p.t * Math.PI) : p.t;
         const heat  = 1 - ht * 0.65;
-        const fv    = Math.min(255, (100 + 155 * heat + ampLevel * 80) | 0);
         const pathA = Math.min(1, p.t * 10) * Math.min(1, (1 - p.t) * 10);
-        _offCtx.globalAlpha = Math.min(1, pathA * env * (0.32 + 0.58 * heat) * (1 + ampLevel * 0.8));
+        const alpha = Math.min(1, pathA * env * (0.32 + 0.58 * heat) * ampBoost2);
+        if (alpha < 0.01) continue; // skip invisible particles (~20% fewer draw calls)
+        const px = bezPt(p.t, f.bx, f.p1x, f.p2x, f.ex);
+        const py = bezPt(p.t, f.by, f.p1y, f.p2y, f.ey);
+        const fv    = Math.min(255, (100 + 155 * heat + ampLevel * 80) | 0);
+        _offCtx.globalAlpha = alpha;
         _offCtx.fillStyle = _rgb[fv];
         _offCtx.beginPath();
-        _offCtx.arc(px, py, p.sz * (1 + ampLevel * 1.8), 0, Math.PI * 2);
+        _offCtx.arc(px, py, p.sz * ampBoost1, 0, Math.PI * 2);
         _offCtx.fill();
       }
 
@@ -471,29 +477,37 @@
       const spawnInterval = 0.09 / (1 + ampLevel * 1.5);
       while (f.spawnTimer >= spawnInterval) {
         f.spawnTimer -= spawnInterval;
-        f.streamers.push({
-          t:    0,
-          spd:  0.018 + Math.random() * 0.045,
-          maxT: 0.45  + Math.random() * 0.45,
-          sz:   0.25  + Math.random() * 0.55,
-        });
+        if (f.streamers.length < 50) // cap per-flare to prevent unbounded growth
+          f.streamers.push({
+            t:    0,
+            spd:  0.018 + Math.random() * 0.045,
+            maxT: 0.45  + Math.random() * 0.45,
+            sz:   0.25  + Math.random() * 0.55,
+          });
       }
-      for (let si = f.streamers.length - 1; si >= 0; si--) {
+      // compact-in-place: O(1) removal instead of splice O(n)
+      let sLen = 0;
+      for (let si = 0; si < f.streamers.length; si++) {
         const s = f.streamers[si];
         s.t += s.spd * dt * speedMult * (1 + ampLevel * 1.0);
-        if (s.t >= s.maxT) { f.streamers.splice(si, 1); continue; }
-        const sx     = bezPt(s.t, f.bx, f.p1x, f.p2x, f.ex);
-        const sy     = bezPt(s.t, f.by, f.p1y, f.p2y, f.ey);
+        if (s.t >= s.maxT) continue; // dead — don't keep
         const prog   = s.t / s.maxT;
         const sAlpha = Math.min(1, prog * 14) * Math.pow(1 - prog, 1.8);
-        const sv     = Math.min(255, (80 + 90 * (1 - prog) + ampLevel * 50) | 0);
-        const ssz    = s.sz * (1 - prog * 0.5) * (1 + ampLevel * 0.8);
-        _offCtx.globalAlpha = Math.min(1, sAlpha * env * 0.45 * (1 + ampLevel * 0.5));
-        _offCtx.fillStyle = `rgb(${sv},${sv},${sv})`;
-        _offCtx.beginPath();
-        _offCtx.arc(sx, sy, Math.max(0.1, ssz), 0, Math.PI * 2);
-        _offCtx.fill();
+        const sA     = Math.min(1, sAlpha * env * 0.45 * (1 + ampLevel * 0.5));
+        if (sA >= 0.01) { // skip invisible streamers
+          const sx   = bezPt(s.t, f.bx, f.p1x, f.p2x, f.ex);
+          const sy   = bezPt(s.t, f.by, f.p1y, f.p2y, f.ey);
+          const sv   = Math.min(255, (80 + 90 * (1 - prog) + ampLevel * 50) | 0);
+          const ssz  = s.sz * (1 - prog * 0.5) * ampBoost2;
+          _offCtx.globalAlpha = sA;
+          _offCtx.fillStyle = _rgb[sv];
+          _offCtx.beginPath();
+          _offCtx.arc(sx, sy, Math.max(0.1, ssz), 0, Math.PI * 2);
+          _offCtx.fill();
+        }
+        f.streamers[sLen++] = s; // keep alive streamer
       }
+      f.streamers.length = sLen;
     }
     while (flares.length < MAX_FLARES) flares.push(mkFlare());
 
