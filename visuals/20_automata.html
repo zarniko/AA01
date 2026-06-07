@@ -211,10 +211,7 @@
   let sunAngle   = 0;
   let sphereRot  = 0;
 
-  // Cross timing (angles live on each flare so new crosses always start H/V)
-  let lastCrossRotTs   = 0;
-  let lastCrossIndivTs = 0;
-  let crossBlink       = 0;
+  let crossBlink = 0;
 
   // ── Audio ─────────────────────────────────────────────────
   let micActive = false, micStream = null, audioCtx = null, analyser = null, timeDomain = null;
@@ -291,7 +288,7 @@
       hasAxis:  Math.random() < 0.5,
       label:    String(10 + Math.floor(Math.random() * 90)),
       ax3dX, ax3dY, ax3dNx, ax3dNy,
-      axCrossAngle: 0, axCrossTargetAngle: 0, // always start H/V
+      axCrossAngle: 0, // starts H/V, audio spins it, decays back at rest
       particles: Array.from({ length: N }, () => ({
         t:   Math.random(),
         spd: 0.04 + Math.random() * 0.10,
@@ -349,18 +346,12 @@
 
     const speedMult = 140 / cycleMs;
 
-    // Cross rotation — per-flare so new crosses always spawn H/V
+    // Cross rotation: audio spins, decays back to H/V when quiet
     crossBlink *= 0.88;
-    const doGroupSpin = ts - lastCrossRotTs > 6000;
-    const doIndivSpin = ts - lastCrossIndivTs > 18000;
-    if (doGroupSpin) lastCrossRotTs = ts;
-    if (doIndivSpin) lastCrossIndivTs = ts;
     for (const f of flares) {
       if (!f.hasAxis) continue;
-      if (doGroupSpin) f.axCrossTargetAngle -= Math.PI / 2;
-      if (doIndivSpin && Math.random() < 0.25) f.axCrossTargetAngle += Math.PI / 2;
-      f.axCrossTargetAngle -= ampLevel * 0.18;
-      f.axCrossAngle += (f.axCrossTargetAngle - f.axCrossAngle) * 0.08;
+      f.axCrossAngle -= ampLevel * 0.025;  // audio drives spin
+      f.axCrossAngle *= 0.985;             // always drift back toward 0 (H/V)
     }
 
     ctx.clearRect(0, 0, W, H);
