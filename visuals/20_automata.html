@@ -233,10 +233,12 @@
   const MAX_FLARES = 14;
 
   function mkFlare() {
+    // Flare origin: on the 2D silhouette circle (edge looks best for particles)
     const theta = Math.random() * Math.PI * 2;
     const bx = SUN_CX + SUN_R * Math.sin(theta);
     const by = SUN_CY - SUN_R * Math.cos(theta);
     const nx = Math.sin(theta), ny = -Math.cos(theta);
+
     const isLoop = Math.random() < 0.40;
     let p1x, p1y, p2x, p2y, ex, ey;
 
@@ -261,11 +263,26 @@
       ey  = by + ny*h      + nx*curl*1.6;
     }
 
+    // Axis annotation: placed at a 3D point on the sphere face at the same latitude
+    // as the flare's vertical position on the edge, at a random front-hemisphere longitude.
+    // cos(theta) maps to the latitude ring at that height.
+    const sinPhi = Math.max(-0.97, Math.min(0.97, Math.cos(theta) / cosE));
+    const axLat  = Math.asin(sinPhi);
+    const axLng  = 0.12 + Math.random() * (Math.PI - 0.24); // front hemisphere
+    const acLat  = Math.cos(axLat), asLat = Math.sin(axLat);
+    const acLng  = Math.cos(axLng), asLng = Math.sin(axLng);
+    const ax3dX  = SUN_CX + SUN_R * acLat * acLng;
+    const ax3dY  = SUN_CY - SUN_R * (asLat * cosE - acLat * asLng * sinE);
+    const axNxR  = ax3dX - SUN_CX, axNyR = ax3dY - SUN_CY;
+    const axNLen = Math.sqrt(axNxR*axNxR + axNyR*axNyR) || 1;
+    const ax3dNx = axNxR / axNLen, ax3dNy = axNyR / axNLen;
+
     const N = 100 + Math.floor(Math.random() * 80);
     return {
       bx, by, p1x, p1y, p2x, p2y, ex, ey, isLoop, nx, ny,
       hasAxis:  Math.random() < 0.5,
       label:    String(10 + Math.floor(Math.random() * 90)),
+      ax3dX, ax3dY, ax3dNx, ax3dNy, // 3D annotation point on sphere face
       particles: Array.from({ length: N }, () => ({
         t:   Math.random(),
         spd: 0.04 + Math.random() * 0.10,
@@ -333,46 +350,13 @@
       crossTargetAngles[Math.floor(Math.random() * 4)] += Math.PI / 2;
       lastCrossIndivTs = ts;
     }
+    for (let i = 0; i < 4; i++) crossTargetAngles[i] -= ampLevel * 0.18; // audio spins crosses
     for (let i = 0; i < 4; i++) crossAngles[i] += (crossTargetAngles[i] - crossAngles[i]) * 0.08;
 
     ctx.clearRect(0, 0, W, H);
 
     // Space background
     ctx.fillStyle = _bgGrad; ctx.fillRect(0, 0, W, H);
-
-    // 9 crosses — window-proportional 3×3 grid (landscape = wider, portrait = taller)
-    {
-      const cs   = 7;
-      const gW   = W * 0.40;
-      const gH   = H * 0.40;
-      const hStp = gW;
-      const vStp = gH;
-      const gL   = (W - gW) / 2;
-      const gT   = (H - gH) / 2;
-      ctx.save();
-      ctx.strokeStyle = lineColor;
-      ctx.lineWidth   = 1;
-      ctx.shadowColor = lineColor;
-      ctx.shadowBlur  = 3;
-      ctx.globalAlpha = 0.28 + crossBlink * 0.65;
-      for (let r = 0; r < 2; r++) {
-        for (let c = 0; c < 2; c++) {
-          const px = gL + c * hStp;
-          const py = gT + r * vStp;
-          ctx.save();
-          ctx.translate(px, py);
-          ctx.rotate(crossAngles[r * 2 + c]);
-          ctx.beginPath();
-          ctx.moveTo(-cs, 0); ctx.lineTo(cs, 0);
-          ctx.moveTo(0, -cs); ctx.lineTo(0, cs);
-          ctx.stroke();
-          ctx.restore();
-        }
-      }
-      ctx.shadowBlur  = 0;
-      ctx.globalAlpha = 1;
-      ctx.restore();
-    }
 
     // Outer corona
     ctx.fillStyle = _crGrad; ctx.fillRect(0, 0, W, H);
@@ -525,24 +509,44 @@
     ctx.shadowBlur   = 8;
     ctx.setLineDash([5, 5]);
     ctx.lineDashOffset = -ts * 0.012;
+    let crossIdx = 0;
     for (const f of flares) {
       if (!f.hasAxis) continue;
       const fLT = (now - f.born) / f.maxLife;
       if (fLT >= 1) continue;
       const fEnv = Math.min(1, fLT * 4) * Math.min(1, (1 - fLT) * 4);
-      const axLen = SUN_R * 1.30;
-      const axEx  = SUN_CX + f.nx * axLen;
-      const axEy  = SUN_CY + f.ny * axLen;
+      // Axis starts at the 3D sphere-surface annotation point, extends outward
+      const axExtend = SUN_R * 0.32;
+      const axEndX   = f.ax3dX + f.ax3dNx * axExtend;
+      const axEndY   = f.ax3dY + f.ax3dNy * axExtend;
+      const cxX      = f.ax3dX + f.ax3dNx * (axExtend + 18);
+      const cxY      = f.ax3dY + f.ax3dNy * (axExtend + 18);
+      const lblX     = f.ax3dX + f.ax3dNx * (axExtend + 40);
+      const lblY     = f.ax3dY + f.ax3dNy * (axExtend + 40);
       ctx.globalAlpha = fEnv * 0.70;
       ctx.beginPath();
-      ctx.moveTo(f.bx, f.by);
-      ctx.lineTo(axEx, axEy);
+      ctx.moveTo(f.ax3dX, f.ax3dY);
+      ctx.lineTo(axEndX, axEndY);
       ctx.stroke();
       ctx.shadowBlur  = 0;
       ctx.setLineDash([]);
       ctx.globalAlpha = fEnv * 0.85;
       ctx.fillStyle   = lineColor;
-      ctx.fillText(f.label, SUN_CX + f.nx * (axLen + 14), SUN_CY + f.ny * (axLen + 14));
+      ctx.fillText(f.label, lblX, lblY);
+      // Cross at clearance position for up to 4 axis flares
+      if (crossIdx < 4) {
+        ctx.save();
+        ctx.lineWidth   = 1.5;
+        ctx.shadowBlur  = 5;
+        ctx.globalAlpha = fEnv * (0.62 + crossBlink * 0.38);
+        ctx.translate(cxX, cxY);
+        ctx.rotate(crossAngles[crossIdx++]);
+        ctx.beginPath();
+        ctx.moveTo(-9, 0); ctx.lineTo(9, 0);
+        ctx.moveTo(0, -9); ctx.lineTo(0, 9);
+        ctx.stroke();
+        ctx.restore();
+      }
       ctx.shadowBlur     = 8;
       ctx.setLineDash([5, 5]);
     }
