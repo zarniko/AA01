@@ -211,9 +211,7 @@
   let sunAngle   = 0;
   let sphereRot  = 0;
 
-  // Cross state
-  const crossAngles       = new Float64Array(4);
-  const crossTargetAngles = new Float64Array(4);
+  // Cross timing (angles live on each flare so new crosses always start H/V)
   let lastCrossRotTs   = 0;
   let lastCrossIndivTs = 0;
   let crossBlink       = 0;
@@ -243,11 +241,11 @@
     let p1x, p1y, p2x, p2y, ex, ey;
 
     if (isLoop) {
-      const dT = (0.2 + Math.random() * 0.6) * (Math.random() < 0.5 ? 1 : -1);
+      const dT = (0.06 + Math.random() * 0.22) * (Math.random() < 0.5 ? 1 : -1);
       const t2 = theta + dT;
       ex = SUN_CX + SUN_R * Math.sin(t2);
       ey = SUN_CY - SUN_R * Math.cos(t2);
-      const h = SUN_R * (0.10 + Math.random() * 0.42);
+      const h = SUN_R * (0.04 + Math.random() * 0.16);
       p1x = bx + nx * h + (Math.random()-0.5)*h*0.3;
       p1y = by + ny * h + (Math.random()-0.5)*h*0.3;
       p2x = ex + Math.sin(t2)*h + (Math.random()-0.5)*h*0.3;
@@ -263,26 +261,37 @@
       ey  = by + ny*h      + nx*curl*1.6;
     }
 
-    // Axis annotation: placed at a 3D point on the sphere face at the same latitude
-    // as the flare's vertical position on the edge, at a random front-hemisphere longitude.
-    // cos(theta) maps to the latitude ring at that height.
-    const sinPhi = Math.max(-0.97, Math.min(0.97, Math.cos(theta) / cosE));
-    const axLat  = Math.asin(sinPhi);
-    const axLng  = 0.12 + Math.random() * (Math.PI - 0.24); // front hemisphere
-    const acLat  = Math.cos(axLat), asLat = Math.sin(axLat);
-    const acLng  = Math.cos(axLng), asLng = Math.sin(axLng);
-    const ax3dX  = SUN_CX + SUN_R * acLat * acLng;
-    const ax3dY  = SUN_CY - SUN_R * (asLat * cosE - acLat * asLng * sinE);
-    const axNxR  = ax3dX - SUN_CX, axNyR = ax3dY - SUN_CY;
-    const axNLen = Math.sqrt(axNxR*axNxR + axNyR*axNyR) || 1;
-    const ax3dNx = axNxR / axNLen, ax3dNy = axNyR / axNLen;
+    // Axis annotation: placed on the sphere face near the flare's latitude,
+    // with rejection sampling to keep annotations spread apart.
+    const sinPhi    = Math.max(-0.97, Math.min(0.97, Math.cos(theta) / cosE));
+    const axLatBase = Math.asin(sinPhi);
+    let ax3dX = 0, ax3dY = 0, ax3dNx = 1, ax3dNy = 0;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const axLat = axLatBase + (Math.random() - 0.5) * 0.35; // ±~20° latitude wiggle
+      const axLng = 0.12 + Math.random() * (Math.PI - 0.24);
+      const acLat = Math.cos(axLat), asLat = Math.sin(axLat);
+      const acLng = Math.cos(axLng), asLng = Math.sin(axLng);
+      const cx = SUN_CX + SUN_R * acLat * acLng;
+      const cy = SUN_CY - SUN_R * (asLat * cosE - acLat * asLng * sinE);
+      let tooClose = false;
+      for (const f of flares) {
+        if (!f.hasAxis) continue;
+        const dx = cx - f.ax3dX, dy = cy - f.ax3dY;
+        if (dx*dx + dy*dy < 100*100) { tooClose = true; break; }
+      }
+      const nxR = cx - SUN_CX, nyR = cy - SUN_CY;
+      const nL  = Math.sqrt(nxR*nxR + nyR*nyR) || 1;
+      ax3dX = cx; ax3dY = cy; ax3dNx = nxR / nL; ax3dNy = nyR / nL;
+      if (!tooClose) break;
+    }
 
     const N = 100 + Math.floor(Math.random() * 80);
     return {
       bx, by, p1x, p1y, p2x, p2y, ex, ey, isLoop, nx, ny,
       hasAxis:  Math.random() < 0.5,
       label:    String(10 + Math.floor(Math.random() * 90)),
-      ax3dX, ax3dY, ax3dNx, ax3dNy, // 3D annotation point on sphere face
+      ax3dX, ax3dY, ax3dNx, ax3dNy,
+      axCrossAngle: 0, axCrossTargetAngle: 0, // always start H/V
       particles: Array.from({ length: N }, () => ({
         t:   Math.random(),
         spd: 0.04 + Math.random() * 0.10,
@@ -340,18 +349,19 @@
 
     const speedMult = 140 / cycleMs;
 
-    // Cross rotation (all 90° CCW every 6s, random individual CW every 18s)
+    // Cross rotation — per-flare so new crosses always spawn H/V
     crossBlink *= 0.88;
-    if (ts - lastCrossRotTs > 6000) {
-      for (let i = 0; i < 4; i++) crossTargetAngles[i] -= Math.PI / 2;
-      lastCrossRotTs = ts;
+    const doGroupSpin = ts - lastCrossRotTs > 6000;
+    const doIndivSpin = ts - lastCrossIndivTs > 18000;
+    if (doGroupSpin) lastCrossRotTs = ts;
+    if (doIndivSpin) lastCrossIndivTs = ts;
+    for (const f of flares) {
+      if (!f.hasAxis) continue;
+      if (doGroupSpin) f.axCrossTargetAngle -= Math.PI / 2;
+      if (doIndivSpin && Math.random() < 0.25) f.axCrossTargetAngle += Math.PI / 2;
+      f.axCrossTargetAngle -= ampLevel * 0.18;
+      f.axCrossAngle += (f.axCrossTargetAngle - f.axCrossAngle) * 0.08;
     }
-    if (ts - lastCrossIndivTs > 18000) {
-      crossTargetAngles[Math.floor(Math.random() * 4)] += Math.PI / 2;
-      lastCrossIndivTs = ts;
-    }
-    for (let i = 0; i < 4; i++) crossTargetAngles[i] -= ampLevel * 0.18; // audio spins crosses
-    for (let i = 0; i < 4; i++) crossAngles[i] += (crossTargetAngles[i] - crossAngles[i]) * 0.08;
 
     ctx.clearRect(0, 0, W, H);
 
@@ -509,13 +519,11 @@
     ctx.shadowBlur   = 8;
     ctx.setLineDash([5, 5]);
     ctx.lineDashOffset = -ts * 0.012;
-    let crossIdx = 0;
     for (const f of flares) {
       if (!f.hasAxis) continue;
       const fLT = (now - f.born) / f.maxLife;
       if (fLT >= 1) continue;
       const fEnv = Math.min(1, fLT * 4) * Math.min(1, (1 - fLT) * 4);
-      // Axis starts at the 3D sphere-surface annotation point, extends outward
       const axExtend = SUN_R * 0.32;
       const axEndX   = f.ax3dX + f.ax3dNx * axExtend;
       const axEndY   = f.ax3dY + f.ax3dNy * axExtend;
@@ -533,20 +541,17 @@
       ctx.globalAlpha = fEnv * 0.85;
       ctx.fillStyle   = lineColor;
       ctx.fillText(f.label, lblX, lblY);
-      // Cross at clearance position for up to 4 axis flares
-      if (crossIdx < 4) {
-        ctx.save();
-        ctx.lineWidth   = 1.5;
-        ctx.shadowBlur  = 5;
-        ctx.globalAlpha = fEnv * (0.62 + crossBlink * 0.38);
-        ctx.translate(cxX, cxY);
-        ctx.rotate(crossAngles[crossIdx++]);
-        ctx.beginPath();
-        ctx.moveTo(-9, 0); ctx.lineTo(9, 0);
-        ctx.moveTo(0, -9); ctx.lineTo(0, 9);
-        ctx.stroke();
-        ctx.restore();
-      }
+      ctx.save();
+      ctx.lineWidth   = 1.5;
+      ctx.shadowBlur  = 5;
+      ctx.globalAlpha = fEnv * (0.62 + crossBlink * 0.38);
+      ctx.translate(cxX, cxY);
+      ctx.rotate(f.axCrossAngle);
+      ctx.beginPath();
+      ctx.moveTo(-9, 0); ctx.lineTo(9, 0);
+      ctx.moveTo(0, -9); ctx.lineTo(0, 9);
+      ctx.stroke();
+      ctx.restore();
       ctx.shadowBlur     = 8;
       ctx.setLineDash([5, 5]);
     }
