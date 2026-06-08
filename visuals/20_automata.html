@@ -566,29 +566,47 @@
   requestAnimationFrame(frame);
 
   // ── Grain ─────────────────────────────────────────────────
+  // Pre-baked: generate N frames once at startup, cycle with putImageData at 30fps.
+  // Eliminates ~1M Math.random() calls/frame from the hot loop.
   let grainOn = true;
   const grainEl = document.getElementById('grain-cv');
   const grainCx = grainEl.getContext('2d');
-  let grainImg = null;
-  function drawGrainFrame() {
-    if (!grainOn) return;
+  const GRAIN_N = 4;
+  const _grainImgs = [];
+  let _grainIdx = 0, _grainLastTs = 0;
+
+  function prebakeGrain() {
     const gW = Math.ceil(window.innerWidth  / 2);
     const gH = Math.ceil(window.innerHeight / 2);
-    if (grainEl.width !== gW || grainEl.height !== gH) {
-      grainEl.width = gW; grainEl.height = gH;
-      grainImg = grainCx.createImageData(gW, gH);
+    grainEl.width = gW; grainEl.height = gH;
+    _grainImgs.length = 0;
+    const buf = new Uint8Array(gW * gH * 2); // value + alpha per pixel
+    for (let f = 0; f < GRAIN_N; f++) {
+      const img = grainCx.createImageData(gW, gH);
+      const d = img.data;
+      crypto.getRandomValues(buf);
+      for (let i = 0, j = 0; i < d.length; i += 4, j += 2) {
+        d[i] = d[i+1] = d[i+2] = buf[j];
+        d[i+3] = (buf[j+1] * 30 / 255) | 0;
+      }
+      _grainImgs.push(img);
     }
-    const data = grainImg.data;
-    for (let i = 0; i < data.length; i += 4) {
-      const v = Math.random() * 255 | 0;
-      data[i] = data[i+1] = data[i+2] = v;
-      data[i+3] = Math.random() * 30 | 0;
+  }
+
+  function drawGrainFrame(ts) {
+    if (!grainOn) return;
+    if (ts - _grainLastTs >= 33) { // 30fps cap — imperceptible vs 120fps
+      grainCx.putImageData(_grainImgs[_grainIdx], 0, 0);
+      _grainIdx = (_grainIdx + 1) % GRAIN_N;
+      _grainLastTs = ts;
     }
-    grainCx.putImageData(grainImg, 0, 0);
     requestAnimationFrame(drawGrainFrame);
   }
-  window.addEventListener('keydown', e => { if (e.key === 'g' || e.key === 'G') { grainOn = !grainOn; if (grainOn) drawGrainFrame(); } });
-  drawGrainFrame();
+
+  window.addEventListener('resize', prebakeGrain);
+  window.addEventListener('keydown', e => { if (e.key === 'g' || e.key === 'G') { grainOn = !grainOn; if (grainOn) requestAnimationFrame(drawGrainFrame); } });
+  prebakeGrain();
+  requestAnimationFrame(drawGrainFrame);
 
   // ── Canvas click / T key ──────────────────────────────────
   canvas.addEventListener('click', triggerBurst);
