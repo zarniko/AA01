@@ -285,7 +285,7 @@
     const N = 100 + Math.floor(Math.random() * 80);
     return {
       bx, by, p1x, p1y, p2x, p2y, ex, ey, isLoop, nx, ny,
-      hasAxis:  Math.random() < 0.5,
+      hasAxis:  flares.reduce((n, f) => n + (f.hasAxis ? 1 : 0), 0) < 4 && Math.random() < 0.5,
       label:    String(10 + Math.floor(Math.random() * 90)),
       ax3dX, ax3dY, ax3dNx, ax3dNy,
       axCrossAngle: 0, // starts H/V, audio spins it, decays back at rest
