@@ -580,14 +580,12 @@
     const gH = Math.ceil(window.innerHeight / 2);
     grainEl.width = gW; grainEl.height = gH;
     _grainImgs.length = 0;
-    const buf = new Uint8Array(gW * gH * 2); // value + alpha per pixel
     for (let f = 0; f < GRAIN_N; f++) {
       const img = grainCx.createImageData(gW, gH);
       const d = img.data;
-      crypto.getRandomValues(buf);
-      for (let i = 0, j = 0; i < d.length; i += 4, j += 2) {
-        d[i] = d[i+1] = d[i+2] = buf[j];
-        d[i+3] = (buf[j+1] * 30 / 255) | 0;
+      for (let i = 0; i < d.length; i += 4) {
+        d[i] = d[i+1] = d[i+2] = Math.random() * 255 | 0;
+        d[i+3] = Math.random() * 30 | 0;
       }
       _grainImgs.push(img);
     }
