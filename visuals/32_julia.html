@@ -1,0 +1,927 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Julia</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Roboto+Mono&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #000;
+    height: 100vh;
+    overflow: hidden;
+    font-family: 'Roboto Mono', monospace;
+  }
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: radial-gradient(ellipse at center, #0a0f00 0%, #000 70%);
+    z-index: 0;
+  }
+  #canvas { position: fixed; inset: 0; z-index: 1; display: block; }
+  .scanline {
+    position: fixed; inset: 0;
+    background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.08) 2px, rgba(0,0,0,0.08) 4px);
+    pointer-events: none; z-index: 2;
+  }
+  .vignette {
+    position: fixed; inset: 0;
+    background: radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.7) 100%);
+    pointer-events: none; z-index: 3;
+  }
+  #btn {
+    all: unset; position: fixed; top: 20px; left: 24px; z-index: 4;
+    font-family: 'Roboto Mono', monospace; font-size: 14px;
+    color: #39ff14; letter-spacing: 3px; cursor: pointer;
+  }
+  #pgkeys {
+    position: fixed; top: 54px; left: 24px; z-index: 4;
+    font-family: 'Roboto Mono', monospace; font-size: 14px;
+    letter-spacing: 3px; color: #39ff14; display: flex; gap: 1ch;
+  }
+  #pkey { cursor: pointer; }
+  #grain-cv {
+    position: fixed; inset: 0; width: 100%; height: 100%;
+    pointer-events: none; z-index: 5;
+  }
+  #legend {
+    position: fixed; top: 20px; right: 24px; z-index: 4;
+    font-family: 'Roboto Mono', monospace; font-size: 14px;
+    display: grid; grid-template-columns: repeat(8, 1em);
+    gap: 4px 6px; line-height: 1.4; text-align: center;
+  }
+  #zko {
+    position: fixed; bottom: 20px; left: 24px; z-index: 4;
+    font-family: 'Roboto Mono', monospace; font-size: 14px;
+    letter-spacing: 3px; color: #39ff14; text-decoration: none; cursor: pointer;
+  }
+  #dbg {
+    position: fixed; bottom: 20px; left: 100px; z-index: 4;
+    font-family: 'Roboto Mono', monospace; font-size: 14px;
+    letter-spacing: 3px; color: #39ff14; pointer-events: none; white-space: nowrap;
+  }
+  #br-stack {
+    position: fixed; bottom: 20px; right: 24px; z-index: 4;
+    display: flex; flex-direction: column; align-items: flex-end;
+    pointer-events: none;
+  }
+  #br-stack > * { pointer-events: auto; }
+  #ops {
+    font-family: 'Roboto Mono', monospace; font-size: 14px;
+    letter-spacing: 3px; color: #39ff14;
+  }
+  #speed {
+    font-family: 'Roboto Mono', monospace; font-size: 14px;
+    letter-spacing: 3px; color: #39ff14; user-select: none;
+  }
+  #speed span { cursor: pointer; }
+  #mbrot {
+    image-rendering: pixelated;
+    border: 2px solid rgba(57, 255, 20, 0.3);
+  }
+  #annot-cv {
+    position: fixed; inset: 0; z-index: 6;
+    pointer-events: none;
+  }
+  #ckey {
+    position: fixed; top: 68px; right: 24px; width: 1em; z-index: 4;
+    font-family: 'Roboto Mono', monospace; font-size: 14px;
+    line-height: 1.4; color: #39ff14; text-align: center; pointer-events: none;
+  }
+
+</style>
+</head>
+<body>
+<div class="scanline"></div>
+<div class="vignette"></div>
+<button id="btn"></button>
+<div id="pgkeys">
+  <div id="pkey">T</div>
+</div>
+<canvas id="grain-cv"></canvas>
+<div id="legend"></div>
+<div id="br-stack">
+  <canvas id="mbrot"></canvas>
+  <div style="height:1.6em"></div>
+  <div id="speed"><span id="spdL">&lt;</span> <span id="spdR">&gt;</span></div>
+  <div id="ops"></div>
+</div>
+<canvas id="annot-cv"></canvas>
+<div id="ckey">C</div>
+<a id="zko" href="https://zko.io" target="_blank" rel="noopener"></a>
+<canvas id="canvas"></canvas>
+<script>
+  const canvas = document.getElementById('canvas');
+  const ctx    = canvas.getContext('2d');
+  let W, H;
+  function resize() { W = canvas.width = window.innerWidth; H = canvas.height = window.innerHeight; }
+  resize();
+  window.addEventListener('resize', resize);
+
+  const annotCv  = document.getElementById('annot-cv');
+  const aCtx     = annotCv.getContext('2d');
+  function resizeAnnot() { annotCv.width = window.innerWidth; annotCv.height = window.innerHeight; }
+  resizeAnnot();
+  window.addEventListener('resize', resizeAnnot);
+
+  // ── Julia set parameters ───────────────────────────────────
+  //
+  // The Julia set is defined by iterating z = z² + c for every point z₀
+  // on the complex plane, where c is a fixed complex constant.
+  //
+  // For each pixel (mapped to a complex number z₀), we iterate:
+  //   z_{n+1} = z_n² + c
+  // If |z| stays bounded (< 2), the point is "in" the set (rendered as space).
+  // If |z| escapes, the iteration count determines which ASCII character
+  // is drawn — higher counts (slower escape) get denser characters.
+  //
+  // Changing c completely reshapes the fractal. Each c value produces a
+  // unique Julia set — some connected and lacy, others fragmented (Cantor dust).
+  // Points where c yields a connected Julia set are exactly the points
+  // inside the Mandelbrot set — hence the Mandelbrot thumbnail showing
+  // where the current c lives.
+  //
+  // Interesting c values to cycle through on T-key
+  const C_PRESETS = [
+    [-0.7269, 0.1889],   // boundary — intricate spiral
+    [-0.8, 0.156],       // boundary — dendrite
+    [0.285, 0.01],       // boundary — lacy filaments
+    [-0.4, 0.6],         // boundary — swirl
+    [0.355, 0.355],      // boundary — branching
+    [-0.54, 0.54],       // boundary — seahorse valley
+    [0.37, 0.1],         // boundary — fine tendrils
+    [-0.12, -0.77],      // boundary — lightning
+    [-0.75, 0.03],       // near boundary — cardioid cusp
+    [-0.1, 0.65],        // near boundary — main cardioid edge
+    [-1.0, 0.0],         // interior — basilica (period-2 bulb)
+    [0.28, 0.008],       // boundary — spiral arm tip
+  ];
+
+  // [audio wobble gain, idle drift amplitude, drift speed multiplier] per preset index
+  const DEFAULT_MOTION = [0.08, 0, 1];
+  const PRESET_MOTION = { 8: [0.5, 0.035, 3], 10: [0.5, 0.045, 3] };
+
+  let cReal = C_PRESETS[0][0];
+  let cImag = C_PRESETS[0][1];
+  let targetCReal = cReal;
+  let targetCImag = cImag;
+  let presetIdx = 0;
+
+  // Shuffle bag — cycle all 12 before repeating any
+  let _presetBag = [];
+  function nextPreset() {
+    if (_presetBag.length === 0) {
+      _presetBag = Array.from({length: C_PRESETS.length}, (_, i) => i);
+      // Fisher-Yates shuffle
+      for (let i = _presetBag.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [_presetBag[i], _presetBag[j]] = [_presetBag[j], _presetBag[i]];
+      }
+      // Avoid repeating the current preset at the start of new bag
+      if (_presetBag[0] === presetIdx && _presetBag.length > 1) {
+        [_presetBag[0], _presetBag[1]] = [_presetBag[1], _presetBag[0]];
+      }
+    }
+    presetIdx = _presetBag.shift();
+  }
+
+  // ── Preset indicator grid (6x2 ASCII boxes, drawn on annotation canvas) ──
+  function drawPresetGrid(ts) {
+    const uiCol = typeof VGA !== 'undefined' ? VGA[uiColorIdx] : '#39ff14';
+    const mbRect = document.getElementById('mbrot').getBoundingClientRect();
+    const cellW = CHAR_W || 10;
+    const cellH = CHAR_H;
+    const cols = 6, rows = 2;
+    const gap = 2;
+    const gridW = cols * cellW + (cols - 1) * gap;
+    // Right-align with thumbnail, 2 lines above it
+    const startX = mbRect.right - gridW;
+    const startY = mbRect.top - cellH * 1 - rows * cellH - (rows - 1) * gap;
+
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const idx = r * cols + c;
+        if (idx >= C_PRESETS.length) continue;
+        const x = startX + c * (cellW + gap);
+        const y = startY + r * (cellH + gap);
+        const isActive = idx === presetIdx;
+
+        // Box outline
+        aCtx.globalAlpha = isActive ? 0.9 : 0.25;
+        aCtx.strokeStyle = uiCol;
+        aCtx.shadowColor = isActive ? uiCol : 'transparent';
+        aCtx.shadowBlur = isActive ? 6 : 0;
+        aCtx.lineWidth = 1;
+        aCtx.setLineDash([]);
+        aCtx.strokeRect(x, y, cellW, cellH);
+
+        // Diagonal slash on active
+        if (isActive) {
+          aCtx.beginPath();
+          aCtx.moveTo(x + 1, y + cellH - 1);
+          aCtx.lineTo(x + cellW - 1, y + 1);
+          aCtx.lineWidth = 1.5;
+          aCtx.stroke();
+        }
+      }
+    }
+    // Preset number label, 1 char left of grid, aligned with top row
+    const num = String(presetIdx + 1).padStart(2, '0');
+    aCtx.globalAlpha = 0.9;
+    aCtx.font = '14px "Roboto Mono", monospace';
+    aCtx.fillStyle = uiCol;
+    aCtx.shadowColor = uiCol;
+    aCtx.shadowBlur = 6;
+    aCtx.textAlign = 'right';
+    aCtx.textBaseline = 'top';
+    aCtx.fillText(num, startX - cellW, startY);
+    aCtx.shadowBlur = 0;
+    aCtx.fillText(num, startX - cellW, startY);
+
+    aCtx.globalAlpha = 1;
+    aCtx.shadowBlur = 0;
+  }
+
+  const MAX_ITER = 64;
+  const CHAR_H = 16;
+  let CHAR_W = 0;
+
+  // Offscreen buffer for pixel-rendered Julia set
+  const juliaOffscreen = document.createElement('canvas');
+  const juliaOffCtx    = juliaOffscreen.getContext('2d');
+  let juliaImg = null, juliaPx = null;
+  const glowCv = document.createElement('canvas');
+  const glowCx = glowCv.getContext('2d');
+  let JW = 0, JH = 0;
+
+  // ── State ────────────────────────────────────────────────────
+  let speedBump  = 0;
+  let ampLevel   = 0;
+  let lineColor  = '#39ff14';
+  let colorIdx   = 10;
+  let uiColorIdx = 10;
+  let lastTs       = null;
+  let _lastSpikeTs = 0;
+  let crossPulse   = 0;
+  let _crossDashOff = 0;
+  const JGX = 38, JGY = 24;
+  const _jIterBuf = new Float32Array(JGX * JGY);
+  let _jDiv = 3;
+  let _lightAng = -Math.PI * 0.5;
+  let _lastCR = NaN, _lastCI = NaN, _lastJW = 0, _lastJH = 0;
+  let _juliaPeaks = [];
+  // Cached per-pixel iteration + unit surface normal (light-independent)
+  let _pIter = null, _pNx = null, _pNy = null;
+  // sqrt(iter/MAX_ITER) lookup
+  const _sqrtTab = new Float32Array(MAX_ITER + 1);
+  for (let i = 0; i <= MAX_ITER; i++) _sqrtTab[i] = Math.sqrt(i / MAX_ITER);
+
+  // ── Audio ────────────────────────────────────────────────────
+  let analyser = null, timeDomain = null;
+  let micActive = false, micStream = null, audioCtx = null;
+  let parentAudio = null;
+
+  // Beat detection: bass-band level (dB-scale bytes) vs its running mean.
+  // Level-invariant, so quiet speaker->mic music and loud tab audio behave alike.
+  let _bassAvg = -1, _pulse = 0, _freqBuf = null;
+  function bassLevel(f, binHz) {
+    const lo = Math.max(1, Math.round(50 / binHz));
+    const hi = Math.max(lo, Math.round(200 / binHz));
+    let sum = 0;
+    for (let k = lo; k <= hi; k++) sum += f[k];
+    return sum / (hi - lo + 1);
+  }
+  let _bassVar = 16, _bassWarm = 0;
+  const _dbg = { b: 0, avg: 0, sd: 0, dev: 0, beat: 0 };
+  function detectBeat(f, binHz) {
+    if (!f) { _bassAvg = -1; return 0; }
+    const b = bassLevel(f, binHz);
+    if (_bassAvg < 0) { _bassAvg = b; _bassVar = 16; _bassWarm = 40; return 0; } // warm-up skips analyser start-up ramp
+    const dev = b - _bassAvg;
+    _bassAvg += dev * 0.015;                          // ~1s baseline
+    _bassVar += (dev * dev - _bassVar) * 0.015;       // running variance of the bass level
+    let beat = 0;
+    if (_bassWarm > 0) _bassWarm--;
+    else {
+      // Threshold scales with the music's own contrast; absolute floor keeps room noise out
+      const sd = Math.sqrt(_bassVar);
+      beat = Math.max(0, Math.min(1, (dev - Math.max(3, sd * 0.8)) / Math.max(8, sd * 1.7)));
+      _dbg.sd = sd;
+    }
+    _dbg.b = b; _dbg.avg = _bassAvg; _dbg.dev = dev; _dbg.beat = beat;
+    return beat;
+  }
+
+  // ── Render ───────────────────────────────────────────────────
+  function frame(ts) {
+    if (!lastTs) lastTs = ts;
+    const dt = Math.min((ts - lastTs) / 1000, 0.05);
+    lastTs = ts;
+
+    // Audio
+    let beat = 0;
+    if (micActive || parentAudio) {
+      if (micActive) {
+        analyser.getByteTimeDomainData(timeDomain);
+        analyser.getByteFrequencyData(_freqBuf);
+        let sq = 0;
+        for (let k = 0; k < timeDomain.length; k++) {
+          const d = timeDomain[k] / 255 - 0.5; sq += d * d;
+        }
+        beat = detectBeat(_freqBuf, audioCtx.sampleRate / analyser.fftSize);
+        _dbg.rms = Math.sqrt(sq / timeDomain.length);
+      } else {
+        const fd = parentAudio.freqData;
+        beat = detectBeat(fd, 24000 / (fd ? fd.length : 1));
+        _dbg.rms = parentAudio.rms;
+      }
+      _pulse = Math.max(beat, _pulse * 0.88);
+      // fast attack, slower release
+      ampLevel += (_pulse - ampLevel) * (_pulse > ampLevel ? 0.5 : 0.15);
+      if (beat > 0.15) speedBump = Math.max(speedBump, beat * 3);
+    } else {
+      ampLevel *= 0.92;
+    }
+    speedBump *= 0.93;
+    // Light spins at base 0.21 rad/s (~30s/rev), faster with audio / trigger
+    _lightAng += dt * (0.21 + speedBump * 0.9);
+
+    // Strong beat triggers preset change
+    if (beat > 0.85 && ts - _lastSpikeTs > 4000) {
+      _lastSpikeTs = ts;
+      nextPreset();
+
+      speedBump = Math.max(speedBump, 4.5);
+    }
+
+    // Audio morphs c parameter
+    // Connected / interior-heavy presets barely react to a small wobble: bigger audio gain + idle drift
+    const mo = PRESET_MOTION[presetIdx] || DEFAULT_MOTION;
+    targetCReal = C_PRESETS[presetIdx][0] + (ampLevel * mo[0] + mo[1]) * Math.sin(ts * 0.0003 * mo[2]);
+    targetCImag = C_PRESETS[presetIdx][1] + (ampLevel * mo[0] + mo[1]) * Math.cos(ts * 0.0004 * mo[2]);
+    const cLerp = 0.08 + Math.min(0.17, ampLevel * 0.3);
+    cReal += (targetCReal - cReal) * cLerp;
+    cImag += (targetCImag - cImag) * cLerp;
+
+    ctx.clearRect(0, 0, W, H);
+
+    // Measure char width for preset grid UI (non-blocking)
+    if (!CHAR_W) {
+      ctx.font = '14px "Roboto Mono", monospace';
+      const m = ctx.measureText('@').width;
+      if (m > 2) CHAR_W = m;
+    }
+
+    const zoom   = 1.5;
+    const aspect = W / H;
+    const cxOff = 0;
+
+    // Size offscreen buffer at third resolution, scale up on draw
+    // Coarser fractal buffer while c is moving (audio / idle drift), finer when settled
+    const moving = ampLevel > (_jDiv === 4 ? 0.02 : 0.05) || !!PRESET_MOTION[presetIdx];
+    _jDiv = moving ? 4 : 3;
+    JW = Math.ceil(W / _jDiv); JH = Math.ceil(H / _jDiv);
+    if (juliaOffscreen.width !== JW || juliaOffscreen.height !== JH) {
+      juliaOffscreen.width = JW; juliaOffscreen.height = JH;
+    }
+    // Iteration data only depends on c and size — recompute only when c moved
+    const dirty = Math.abs(cReal - _lastCR) > 1e-4 || Math.abs(cImag - _lastCI) > 1e-4 ||
+                  _lastJW !== JW || _lastJH !== JH;
+    if (dirty) {
+      _lastCR = cReal; _lastCI = cImag; _lastJW = JW; _lastJH = JH;
+      iterateJulia(zoom, aspect, cxOff);
+      buildJuliaCoarseGrid(zoom, aspect, cxOff);
+      _juliaPeaks = findJuliaPeaks();
+    }
+    shadeJulia(ts);
+
+    // Glow pass: blurred underlay
+    ctx.save();
+    const gw = Math.max(8, Math.ceil(W / 24)), gh = Math.max(8, Math.ceil(H / 24));
+    if (glowCv.width !== gw || glowCv.height !== gh) { glowCv.width = gw; glowCv.height = gh; }
+    glowCx.drawImage(juliaOffscreen, 0, 0, gw, gh);
+    ctx.globalAlpha = 0.45;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(glowCv, 0, 0, W, H);
+    ctx.restore();
+
+    // Sharp pass
+    ctx.drawImage(juliaOffscreen, 0, 0, W, H);
+
+    drawJuliaCrosses();
+    crossPulse = Math.max(0, crossPulse * 0.97);
+
+    // ── Mandelbrot thumbnail ──────────────────────────────────
+    drawMandelbrot(ts);
+
+    if (_dbgEl) {
+      _dbgEl.textContent = `${(_dbg.rms||0).toFixed(3)} ${_dbg.b.toFixed(0)} ${_dbg.avg.toFixed(0)} ${_dbg.sd.toFixed(1)} ${_dbg.dev.toFixed(1)} ${_dbg.beat.toFixed(2)} ${ampLevel.toFixed(2)}`;
+      _dbgEl.style.color = zkoEl.style.color || '#39ff14';
+    }
+    drawGrainFrame(ts);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // ── Mandelbrot mini-map ─────────────────────────────────────
+  const mbrotEl  = document.getElementById('mbrot');
+  const mbrotCtx = mbrotEl.getContext('2d');
+  let MW = 0, MH = 0;
+  // Full Mandelbrot bounds (for reference)
+  const MB_FULL_RMIN = -2.2, MB_FULL_RMAX = 0.8;
+  const MB_FULL_IMIN = -1.2, MB_FULL_IMAX = 1.2;
+  // Panning viewport — zoomed window that tracks c value
+  const MB_ZOOM = 1.2;  // half-width of viewport in complex units
+  let mbViewR = 0, mbViewI = 0;  // current viewport center (smoothed)
+  let mbrotImg = null, _mbKey = '', _mbLast = 0;
+  let mbrotColor = [57, 255, 20];
+
+  function resizeMbrot() {
+    MW = Math.round(W / 4);
+    MH = Math.round(MW * (H / W));  // match panel aspect ratio
+    mbrotEl.width = MW; mbrotEl.height = MH;
+    mbrotImg = mbrotCtx.createImageData(MW, MH); _mbKey = '';
+  }
+  resizeMbrot();
+  window.addEventListener('resize', resizeMbrot);
+
+  function renderMandelbrot() {
+    // Smoothly pan viewport center toward current c value
+    mbViewR += (cReal - mbViewR) * 0.04;
+    mbViewI += (cImag - mbViewI) * 0.04;
+
+    // Viewport bounds centered on smoothed position
+    const mbAspect = MH / MW;
+    const vrMin = mbViewR - MB_ZOOM, vrMax = mbViewR + MB_ZOOM;
+    const viMin = mbViewI - MB_ZOOM * mbAspect, viMax = mbViewI + MB_ZOOM * mbAspect;
+
+    const mbKey = mbViewR.toFixed(4) + '|' + mbViewI.toFixed(4) + '|' + mbrotColor + '|' + MW + 'x' + MH;
+    const nowMs = performance.now();
+    if (mbKey === _mbKey || nowMs - _mbLast < 66) { mbrotCtx.putImageData(mbrotImg, 0, 0); return; }
+    _mbKey = mbKey; _mbLast = nowMs;
+    const data = mbrotImg.data;
+    const [cr, cg, cb] = mbrotColor;
+    for (let py = 0; py < MH; py++) {
+      for (let px = 0; px < MW; px++) {
+        const r0 = vrMin + (px / MW) * (vrMax - vrMin);
+        const i0 = viMin + (py / MH) * (viMax - viMin);
+        let zr = 0, zi = 0, iter = 0;
+        while (iter < MAX_ITER && zr * zr + zi * zi < 4) {
+          const tmp = zr * zr - zi * zi + r0;
+          zi = 2 * zr * zi + i0;
+          zr = tmp;
+          iter++;
+        }
+        const idx = (py * MW + px) * 4;
+        if (iter === MAX_ITER) {
+          data[idx] = data[idx+1] = data[idx+2] = 0;
+        } else {
+          const b = Math.min(1, iter / MAX_ITER * 3);
+          data[idx]   = cr * b | 0;
+          data[idx+1] = cg * b | 0;
+          data[idx+2] = cb * b | 0;
+        }
+        data[idx+3] = 200;
+      }
+    }
+    mbrotCtx.putImageData(mbrotImg, 0, 0);
+  }
+
+  function hexToRgba(hex, a) {
+    return `rgba(${parseInt(hex.slice(1,3),16)},${parseInt(hex.slice(3,5),16)},${parseInt(hex.slice(5,7),16)},${a.toFixed(3)})`;
+  }
+
+  function buildJuliaCoarseGrid(zoom, aspect, cxOff) {
+    for (let j = 0; j < JGY; j++) {
+      const zi0 = (j / JGY - 0.5) * zoom * 2;
+      for (let i = 0; i < JGX; i++) {
+        const zr0 = (i / JGX - 0.5) * zoom * aspect * 2 + cxOff;
+        let zr = zr0, zi = zi0, iter = 0;
+        while (iter < MAX_ITER && zr * zr + zi * zi < 4) {
+          const tmp = zr * zr - zi * zi + cReal;
+          zi = 2 * zr * zi + cImag; zr = tmp; iter++;
+        }
+        _jIterBuf[j * JGX + i] = iter;
+      }
+    }
+  }
+
+  function findJuliaPeaks() {
+    // Collect all near-boundary cells (escaped but high iter count)
+    const candidates = [];
+    for (let j = 0; j < JGY; j++) {
+      for (let i = 0; i < JGX; i++) {
+        const v = _jIterBuf[j * JGX + i];
+        if (v >= MAX_ITER || v < 6) continue;
+        candidates.push({ x: i / JGX * W, y: j / JGY * H, iter: v, i, j });
+      }
+    }
+    // Pick top candidates with minimum cell spacing to avoid clumping
+    candidates.sort((a, b) => b.iter - a.iter);
+    const peaks = [], minSep = 4;
+    for (const c of candidates) {
+      if (peaks.length >= 12) break;
+      let near = false;
+      for (const p of peaks) {
+        if (Math.abs(c.i - p.i) < minSep && Math.abs(c.j - p.j) < minSep) { near = true; break; }
+      }
+      if (!near) peaks.push(c);
+    }
+    return peaks;
+  }
+
+  function drawJuliaCrosses() {
+    _crossDashOff -= 0.35;
+    const peaks  = _juliaPeaks;
+    const baseA  = 0.45 + crossPulse * 0.40 + ampLevel * 0.15;
+    const uiCol  = lineColor;
+    const maxSz  = Math.min(W, H) / 20;
+
+    ctx.save();
+    ctx.setLineDash([3, 5]);
+    ctx.lineDashOffset = _crossDashOff;
+    ctx.lineWidth = 0.9;
+
+    for (const p of peaks) {
+      const sz = maxSz * (0.3 + 0.7 * (p.iter / MAX_ITER));
+      ctx.strokeStyle = hexToRgba(uiCol, baseA);
+      ctx.beginPath();
+      ctx.moveTo(p.x - sz, p.y - sz); ctx.lineTo(p.x + sz, p.y + sz);
+      ctx.moveTo(p.x + sz, p.y - sz); ctx.lineTo(p.x - sz, p.y + sz);
+      ctx.stroke();
+
+      ctx.setLineDash([]);
+      ctx.fillStyle = hexToRgba(uiCol, baseA + 0.20);
+      ctx.font = '14px "Roboto Mono", monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText((p.iter | 0).toString().padStart(2, '0'), p.x, p.y - sz - 5);
+      ctx.setLineDash([3, 5]);
+      ctx.lineDashOffset = _crossDashOff;
+    }
+
+    ctx.restore();
+  }
+
+  function iterateJulia(zoom, aspect, cxOff) {
+    const jw = juliaOffscreen.width, jh = juliaOffscreen.height;
+    if (!_pIter || _pIter.length !== jw * jh) {
+      _pIter = new Uint8Array(jw * jh);
+      _pNx = new Float32Array(jw * jh);
+      _pNy = new Float32Array(jw * jh);
+    }
+    for (let py = 0; py < jh; py++) {
+      const zi0 = (py / jh - 0.5) * zoom * 2;
+      for (let px = 0; px < jw; px++) {
+        const zr0 = (px / jw - 0.5) * zoom * aspect * 2 + cxOff;
+        let zr = zr0, zi = zi0;
+        let dzr = 1, dzi = 0;
+        let iter = 0;
+        while (iter < MAX_ITER && zr * zr + zi * zi < 4) {
+          // Track derivative: dz = 2*z*dz
+          const nDzr = 2 * (zr * dzr - zi * dzi);
+          dzi = 2 * (zr * dzi + zi * dzr);
+          dzr = nDzr;
+          const tmp = zr * zr - zi * zi + cReal;
+          zi = 2 * zr * zi + cImag;
+          zr = tmp;
+          iter++;
+        }
+        const k = py * jw + px;
+        _pIter[k] = iter;
+        if (iter < MAX_ITER) {
+          // Surface normal from z * conj(dz) — direction perpendicular to Julia boundary
+          const ur = zr * dzr + zi * dzi;
+          const ui = zi * dzr - zr * dzi;
+          const uMag = Math.sqrt(ur * ur + ui * ui);
+          _pNx[k] = uMag > 0 ? ur / uMag : 1;
+          _pNy[k] = uMag > 0 ? ui / uMag : 0;
+        }
+      }
+    }
+  }
+
+  // Cheap per-frame pass: apply rotating light to cached iteration/normal data
+  function shadeJulia(ts) {
+    const jw = juliaOffscreen.width, jh = juliaOffscreen.height;
+    if (!_pIter) return;
+    if (!juliaImg || juliaImg.width !== jw || juliaImg.height !== jh) {
+      juliaImg = juliaOffCtx.createImageData(jw, jh);
+      juliaPx = new Uint32Array(juliaImg.data.buffer);
+    }
+    const px32 = juliaPx;
+    // Slowly rotating light — one full revolution every ~90 seconds, rising from bottom
+    const angle = _lightAng;
+    const lx = Math.cos(angle), ly = Math.sin(angle);
+    const n = jw * jh;
+    for (let k = 0; k < n; k++) {
+      const iter = _pIter[k];
+      if (iter === MAX_ITER) { px32[k] = 0xFF000000; continue; }
+      const light = 0.3 + 0.7 * (0.5 + 0.5 * (_pNx[k] * lx + _pNy[k] * ly));
+      const v = (220 * (0.12 + 0.88 * _sqrtTab[iter]) * light) | 0;
+      px32[k] = 0xFF000000 | (v << 16) | (v << 8) | v; // grey: R=G=B
+    }
+    juliaOffCtx.putImageData(juliaImg, 0, 0);
+  }
+
+  function drawMandelbrot(ts) {
+    // Use UI color for the mandelbrot
+    const uiCol = VGA[uiColorIdx];
+    mbrotEl.style.borderColor = uiCol + '4D';
+    mbrotColor = [
+      parseInt(uiCol.slice(1,3),16),
+      parseInt(uiCol.slice(3,5),16),
+      parseInt(uiCol.slice(5,7),16),
+    ];
+    // Re-render every frame (viewport pans smoothly)
+    renderMandelbrot();
+
+    // Draw c-position cross relative to current viewport
+    const mbAspect = MH / MW;
+    const vrMin = mbViewR - MB_ZOOM, vrMax = mbViewR + MB_ZOOM;
+    const viMin = mbViewI - MB_ZOOM * mbAspect, viMax = mbViewI + MB_ZOOM * mbAspect;
+    const dotX = ((cReal - vrMin) / (vrMax - vrMin)) * MW;
+    const dotY = ((cImag - viMin) / (viMax - viMin)) * MH;
+    const cs = 6;
+    mbrotCtx.strokeStyle = lineColor;
+    mbrotCtx.shadowColor = lineColor;
+    mbrotCtx.shadowBlur = 4;
+    mbrotCtx.lineWidth = 1.5;
+    mbrotCtx.beginPath();
+    mbrotCtx.moveTo(dotX - cs, dotY); mbrotCtx.lineTo(dotX + cs, dotY);
+    mbrotCtx.moveTo(dotX, dotY - cs); mbrotCtx.lineTo(dotX, dotY + cs);
+    mbrotCtx.stroke();
+    mbrotCtx.shadowBlur = 0;
+
+    // ── Annotation: leader line + c value on overlay canvas ────
+    aCtx.clearRect(0, 0, annotCv.width, annotCv.height);
+    const mbRect = mbrotEl.getBoundingClientRect();
+    const screenX = mbRect.left + dotX;
+    const screenY = mbRect.top + dotY;
+
+    // Leader line: 45° up-left, always ending above the thumbnail
+    const mbTop = mbRect.top;
+    const minLen = (screenY - mbTop) + 20; // at least 20px above thumbnail
+    const lineLen = Math.max(50, minLen);
+    const endX = screenX - lineLen;
+    const endY = screenY - lineLen;
+
+    const label = `c=${cReal.toFixed(3)}${cImag >= 0 ? '+' : ''}${cImag.toFixed(3)}i`;
+
+    // Glow pass
+    aCtx.globalAlpha = 0.85;
+    aCtx.strokeStyle = uiCol;
+    aCtx.shadowColor = uiCol;
+    aCtx.shadowBlur  = 10;
+    aCtx.lineWidth   = 1.8;
+    aCtx.setLineDash([4, 3]);
+    aCtx.lineDashOffset = -ts * 0.012;
+    aCtx.beginPath();
+    aCtx.moveTo(screenX, screenY);
+    aCtx.lineTo(endX, endY);
+    aCtx.stroke();
+
+    // Sharp pass
+    aCtx.shadowBlur = 0;
+    aCtx.lineWidth  = 1.2;
+    aCtx.beginPath();
+    aCtx.moveTo(screenX, screenY);
+    aCtx.lineTo(endX, endY);
+    aCtx.stroke();
+    aCtx.setLineDash([]);
+
+    // Label at end of line
+    aCtx.font = '14px "Roboto Mono", monospace';
+    aCtx.textAlign    = 'right';
+    aCtx.textBaseline = 'bottom';
+    const labelW = aCtx.measureText(label).width;
+    const lx = endX - 6, ly = endY - 4;
+
+    // Black background box
+    aCtx.fillStyle = 'rgba(0,0,0,0.75)';
+    aCtx.shadowBlur = 0;
+    aCtx.fillRect(lx - labelW - 4, ly - 16, labelW + 8, 20);
+
+    // Glow pass
+    aCtx.fillStyle    = uiCol;
+    aCtx.shadowColor  = uiCol;
+    aCtx.shadowBlur   = 10;
+    aCtx.fillText(label, lx, ly);
+    // Sharp pass
+    aCtx.shadowBlur = 0;
+    aCtx.fillText(label, lx, ly);
+    aCtx.globalAlpha = 1;
+
+    // Draw preset indicator grid on annotation canvas
+    drawPresetGrid(ts);
+  }
+
+  // ── T key: jump to random c preset ───────────────────────────
+  function triggerPulse() {
+    speedBump = Math.max(speedBump, 4.5);
+    crossPulse = 1.0;
+    nextPreset();
+    updatePresetGrid();
+  }
+  window.addEventListener('keydown', e => {
+    if (e.key === 't' || e.key === 'T') triggerPulse();
+  });
+  document.getElementById('pkey').addEventListener('click', triggerPulse);
+  canvas.addEventListener('click', triggerPulse);
+
+  // ── Grain ───────────────────────────────────────────────────
+  let grainOn = true;
+  const grainEl = document.getElementById('grain-cv');
+  const grainCx = grainEl.getContext('2d');
+  // Pre-baked: generate a few frames once, cycle at 30fps (no per-frame Math.random)
+  const GRAIN_N = 4;
+  const _grainImgs = [];
+  let _grainIdx = 0, _grainLastTs = 0, _grainW = 0, _grainH = 0;
+  function prebakeGrain(gW, gH) {
+    grainEl.width = _grainW = gW; grainEl.height = _grainH = gH;
+    _grainImgs.length = 0;
+    for (let f = 0; f < GRAIN_N; f++) {
+      const img = grainCx.createImageData(gW, gH);
+      const d = img.data;
+      for (let i = 0; i < d.length; i += 4) {
+        d[i] = d[i+1] = d[i+2] = Math.random() * 255 | 0;
+        d[i+3] = Math.random() * 30 | 0;
+      }
+      _grainImgs.push(img);
+    }
+  }
+  function drawGrainFrame(ts) {
+    if (!grainOn) return;
+    const gW = Math.ceil(window.innerWidth  / 2);
+    const gH = Math.ceil(window.innerHeight / 2);
+    if (gW !== _grainW || gH !== _grainH) prebakeGrain(gW, gH);
+    if (ts - _grainLastTs >= 33) {
+      grainCx.putImageData(_grainImgs[_grainIdx], 0, 0);
+      _grainIdx = (_grainIdx + 1) % GRAIN_N;
+      _grainLastTs = ts;
+    }
+  }
+  function toggleGrain() {
+    grainOn = !grainOn;
+  }
+  window.addEventListener('keydown', e => { if (e.key === 'g' || e.key === 'G') toggleGrain(); });
+  // D: audio debug readout
+  let _dbgEl = null;
+  window.addEventListener('keydown', e => {
+    if (e.key !== 'd' && e.key !== 'D') return;
+    if (_dbgEl) { _dbgEl.remove(); _dbgEl = null; return; }
+    _dbgEl = document.createElement('div');
+    _dbgEl.id = 'dbg';  // styled like #zko, sits to its right
+    document.body.appendChild(_dbgEl);
+  });
+
+  // ── Mic toggle ──────────────────────────────────────────────
+  const btn = document.getElementById('btn');
+  btn.addEventListener('click', async () => {
+    if (micActive) {
+      micActive = false; btn.style.opacity = '0.4';
+      micStream?.getTracks().forEach(t => t.stop());
+      audioCtx?.close();
+      micStream = audioCtx = analyser = timeDomain = null;
+      ampLevel = 0; return;
+    }
+    try {
+      micStream  = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, latency: 0 },
+        video: false
+      });
+      audioCtx   = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
+      const src  = audioCtx.createMediaStreamSource(micStream);
+      analyser   = audioCtx.createAnalyser();
+      analyser.fftSize = 1024; analyser.smoothingTimeConstant = 0.2;
+      src.connect(analyser);
+      timeDomain = new Uint8Array(analyser.fftSize);
+      _freqBuf   = new Uint8Array(analyser.frequencyBinCount);
+      _bassAvg = -1;
+      micActive  = true; btn.style.opacity = '';
+    } catch { /* permission denied */ }
+  });
+
+  // ── C-key modifier ──────────────────────────────────────────
+  let cHeld = false;
+  window.addEventListener('keyup', e => { if (e.isTrusted) window.parent?.postMessage({ type: 'childKeyup', key: e.key }, '*'); if (e.key==='c'||e.key==='C') cHeld=false; });
+
+  // ── VGA 16-color legend ─────────────────────────────────────
+  const POOL   = '.,:;+*#@0123456789';
+  const PRIMES = ['2','3','5','7','11','13','17','19','/'];
+  const rc = () => POOL[Math.floor(Math.random() * POOL.length)];
+  const rb = () => String.fromCodePoint(0x2801 + Math.floor(Math.random() * 255));
+  const rp = () => PRIMES[Math.floor(Math.random() * PRIMES.length)];
+  const VGA = [
+    '#000000','#0000AA','#00AA00','#00AAAA',
+    '#AA0000','#AA00AA','#AA5500','#AAAAAA',
+    '#555555','#5555FF','#55FF55','#55FFFF',
+    '#FF5555','#FF55FF','#FFFF55','#FFFFFF',
+  ];
+  const legendEl    = document.getElementById('legend');
+  const zkoEl       = document.getElementById('zko');
+  const legendSpans = VGA.map(col => {
+    const s = document.createElement('span');
+    s.style.color = col; s.style.cursor = 'pointer'; s.textContent = rc();
+    s.addEventListener('click', () => {
+      if (cHeld) {
+        uiColorIdx = VGA.indexOf(col);
+        btn.style.color   = col; zkoEl.style.color = col;
+        document.getElementById('ckey').style.color  = col;
+        document.getElementById('pgkeys').style.color = col;
+        opsEl.style.color = col;
+        document.getElementById('speed').style.color = col;
+
+      } else { lineColor = col; colorIdx = VGA.indexOf(col); }
+    });
+    legendEl.appendChild(s); return s;
+  });
+
+  zkoEl.textContent = rc()+rc()+rc()+rc();
+  btn.textContent   = rb();
+
+  const opsEl = document.getElementById('ops');
+  let cycleMs = 140;
+  function cycleFn() {
+    btn.textContent = rb();
+    zkoEl.textContent = rc()+rc()+rc()+rc(); legendSpans.forEach(s => s.textContent = rc());
+    opsEl.textContent = rc()+rc()+rc()+rc();
+  }
+  let cycleId = setInterval(cycleFn, cycleMs);
+  cycleFn();
+
+  document.getElementById('spdL').addEventListener('click', () => {
+    cycleMs = Math.min(560, cycleMs + 140);
+    clearInterval(cycleId); cycleId = setInterval(cycleFn, cycleMs);
+  });
+  document.getElementById('spdR').addEventListener('click', () => {
+    cycleMs = Math.max(140, cycleMs - 140);
+    clearInterval(cycleId); cycleId = setInterval(cycleFn, cycleMs);
+  });
+
+  window.addEventListener('keydown', e => {
+    if (e.isTrusted) window.parent?.postMessage({ type: 'childKey', key: e.key, shiftKey: !!e.shiftKey }, '*');
+    if (e.key === 'c' || e.key === 'C') { cHeld = true; return; }
+    if      (e.key === 'ArrowLeft'  && !cHeld) {
+      cycleMs = Math.min(560, cycleMs + 140);
+      clearInterval(cycleId); cycleId = setInterval(cycleFn, cycleMs);
+    } else if (e.key === 'ArrowRight' && !cHeld) {
+      cycleMs = Math.max(140, cycleMs - 140);
+      clearInterval(cycleId); cycleId = setInterval(cycleFn, cycleMs);
+    } else if (!cHeld && e.key === 'ArrowUp') {
+      colorIdx = (colorIdx - 1 + VGA.length) % VGA.length; lineColor = VGA[colorIdx];
+    } else if (!cHeld && e.key === 'ArrowDown') {
+      colorIdx = (colorIdx + 1) % VGA.length; lineColor = VGA[colorIdx];
+    } else if (cHeld && e.key === 'ArrowUp') {
+      uiColorIdx = (uiColorIdx - 1 + VGA.length) % VGA.length;
+      btn.style.color   = VGA[uiColorIdx]; zkoEl.style.color = VGA[uiColorIdx];
+      document.getElementById('ckey').style.color   = VGA[uiColorIdx];
+      document.getElementById('pgkeys').style.color = VGA[uiColorIdx];
+      opsEl.style.color = VGA[uiColorIdx];
+      document.getElementById('speed').style.color = VGA[uiColorIdx];
+
+    } else if (cHeld && e.key === 'ArrowDown') {
+      uiColorIdx = (uiColorIdx + 1) % VGA.length;
+      btn.style.color   = VGA[uiColorIdx]; zkoEl.style.color = VGA[uiColorIdx];
+      document.getElementById('ckey').style.color   = VGA[uiColorIdx];
+      document.getElementById('pgkeys').style.color = VGA[uiColorIdx];
+      opsEl.style.color = VGA[uiColorIdx];
+      document.getElementById('speed').style.color = VGA[uiColorIdx];
+
+    }
+  });
+
+  // ── postMessage bridge (keyboard from parent window) ──────────
+  window.addEventListener('message', e => {
+    if (e.data?.type === 'key') {
+      if (e.data.cHeld !== undefined) cHeld = !!e.data.cHeld;
+      window.dispatchEvent(new KeyboardEvent('keydown', {key:e.data.key, shiftKey:!!e.data.shiftKey, bubbles:true}));
+    }
+    else if (e.data?.type === 'keyup')
+      window.dispatchEvent(new KeyboardEvent('keyup', {key:e.data.key, bubbles:true}));
+    else if (e.data?.type === 'audioData')
+      parentAudio = e.data;
+  });
+
+  // Randomize colors on load
+  (function() {
+    const GOOD = [6,11,13,14,15];
+    colorIdx  = GOOD[Math.floor(Math.random() * GOOD.length)];
+    lineColor = VGA[colorIdx];
+    const _uiPool = GOOD.filter(i => i !== colorIdx);
+    uiColorIdx = _uiPool[Math.floor(Math.random() * _uiPool.length)];
+    const _uc = VGA[uiColorIdx];
+    if (btn)   btn.style.color   = _uc;
+    if (zkoEl) zkoEl.style.color = _uc;
+    const _ck = document.getElementById('ckey');
+    const _tk = document.getElementById('pgkeys');
+    if (_ck) _ck.style.color = _uc;
+    if (_tk) _tk.style.color = _uc;
+    if (opsEl) opsEl.style.color = _uc;
+    const _sp = document.getElementById('speed');
+    if (_sp) _sp.style.color = _uc;
+  })();
+</script>
+</body>
+</html>
