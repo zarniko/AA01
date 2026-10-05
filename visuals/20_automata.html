@@ -128,6 +128,11 @@
     text-align: center;
     pointer-events: none;
   }
+  #dbg {
+    position: fixed; bottom: 20px; left: 100px; z-index: 6;
+    font-family: 'Roboto Mono', monospace; font-size: 14px;
+    letter-spacing: 3px; color: #39ff14; pointer-events: none; white-space: nowrap;
+  }
 </style>
 </head>
 <body>
@@ -269,6 +274,22 @@
   // ── Render ────────────────────────────────────────────────
   let lastTs = null;
 
+  // D: audio debug readout (rms, bass, avg, sd, dev, beat, amp) next to the zko link
+  const _dbg = { rms: 0, b: 0, avg: 0, sd: 0, dev: 0, beat: 0 };
+  let _dbgEl = null;
+  window.addEventListener('keydown', e => {
+    if ((e.key !== 'd' && e.key !== 'D') || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (_dbgEl) { _dbgEl.remove(); _dbgEl = null; return; }
+    _dbgEl = document.createElement('div'); _dbgEl.id = 'dbg'; document.body.appendChild(_dbgEl);
+    (function tick() {
+      if (!_dbgEl) return;
+      const z = document.getElementById('zko');
+      _dbgEl.textContent = `${_dbg.rms.toFixed(3)} ${_dbg.b.toFixed(0)} ${_dbg.avg.toFixed(0)} ${_dbg.sd.toFixed(1)} ${_dbg.dev.toFixed(1)} ${_dbg.beat.toFixed(2)} ${(typeof ampLevel === 'number' ? ampLevel : 0).toFixed(2)}`;
+      if (z && z.style.color) _dbgEl.style.color = z.style.color;
+      requestAnimationFrame(tick);
+    })();
+  });
+
   // Bass-band beat detector (same as 32_julia): bass level vs its ~1s running mean, scaled by the music's own variation.
   // Level-invariant, so steady speaker->mic music still produces pulses. Returns 0..1.
   let _fBuf = null, _bAvg = -1, _bVar = 16, _bWarm = 0, _bLast = 0;
@@ -293,7 +314,9 @@
     _bVar += (dev * dev - _bVar) * 0.015;
     if (_bWarm > 0) { _bWarm--; return 0; }
     const sd = Math.sqrt(_bVar);
-    return Math.max(0, Math.min(1, (dev - Math.max(3, sd * 0.8)) / Math.max(8, sd * 1.7)));
+    const _bt = Math.max(0, Math.min(1, (dev - Math.max(3, sd * 0.8)) / Math.max(8, sd * 1.7)));
+    _dbg.b = b; _dbg.avg = _bAvg; _dbg.sd = sd; _dbg.dev = dev; _dbg.beat = _bt;
+    return _bt;
   }
 
   function frame(ts) {
@@ -318,6 +341,7 @@
       } else { rms = parentAudio.rms; }
       beat = beatLevel();
       rms = Math.max(rms, beat * 0.1);   // raw level (claps, loud tab audio) or beat pulse, whichever is larger
+      _dbg.rms = rms;
       ampLevel += (rms * 5 - ampLevel) * 0.1;
       if (rms > 0.06 && !ampWasHigh) { triggerAxisFlash(); ampWasHigh = true; }
       else if (rms < 0.03) ampWasHigh = false;
