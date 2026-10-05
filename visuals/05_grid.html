@@ -66,7 +66,12 @@
       letter-spacing: 3px; color: #39ff14;
       text-decoration: none; cursor: pointer;
     }
-  </style>
+    #dbg {
+    position: fixed; bottom: 20px; left: 100px; z-index: 6;
+    font-family: 'Roboto Mono', monospace; font-size: 14px;
+    letter-spacing: 3px; color: #39ff14; pointer-events: none; white-space: nowrap;
+  }
+</style>
 </head>
 <body>
   <div class="scanline"></div>
@@ -94,7 +99,7 @@
                   '#555555','#5555FF','#55FF55','#55FFFF','#FF5555','#FF55FF','#FFFF55','#FFFFFF'];
     const POOL = '.,:;+*#@0123456789';
     const rc   = () => POOL[Math.floor(Math.random() * POOL.length)];
-    const rb   = () => String.fromCodePoint(0x2801 + Math.floor(Math.random() * 255));
+    const rn   = () => String(Math.floor(Math.random() * 10));   // random digit (mic button)
 
     let lineColor  = '#39ff14';
     let colorIdx   = 10;
@@ -152,29 +157,48 @@
     // Active highlight chars: { x, y, color, char, start, expiry }
     let segments = [];
 
-    // Diagonal dotted lines across 4 random cells at a time
-    let diagCells = [];
+    // Wavy arms: each starts at the centre-most grid intersection and heads out into one of the 4 quadrants.
+    // Every quadrant has 2 strands with different wave phases (so up to 8 lines; 2-8 shown at a time).
+    // A strand is either a chain of single-cell diagonals out to the edge, or ONE long line from the centre to any
+    // grid intersection in its quadrant (so it can stretch between the corners of 2+ cells, at shallower/steeper angles).
+    const ARM_DIRS = [[1, 1], [1, -1], [-1, 1], [-1, -1]];
+    const STRANDS  = 2;
+    const ALL_ARMS = ARM_DIRS.flatMap(([dx, dy]) => Array.from({ length: STRANDS }, (_, st) => [dx, dy, st]));
+    let diagArms = [];
     function pickDiagCells() {
-      const blocked = new Set();
-      diagCells = [];
-      let attempts = 0;
-      while (diagCells.length < 3 && attempts < 200) {
-        attempts++;
-        const ci = 1 + Math.floor(Math.random() * (GCOLS - 2)); // cols 1–6
-        const ri = 1 + Math.floor(Math.random() * (GROWS - 2)); // rows 1–2
-        const key = ri * GCOLS + ci;
-        if (blocked.has(key)) continue;
-        // Block this cell and all 8 neighbours
-        for (let dr = -1; dr <= 1; dr++)
-          for (let dc = -1; dc <= 1; dc++) {
-            const nr = ri + dr, nc = ci + dc;
-            if (nr >= 0 && nr < GROWS && nc >= 0 && nc < GCOLS)
-              blocked.add(nr * GCOLS + nc);
-          }
-        diagCells.push({ ci, ri, dir: Math.random() < 0.5 ? 0 : 1 });
-      }
+      const order = ALL_ARMS.map(a => a).sort(() => Math.random() - 0.5);
+      diagArms = order.slice(0, 2 + Math.floor(Math.random() * 7)).map(([dx, dy, st]) => {
+        if (Math.random() < 0.45) return [dx, dy, st, 0, 0];                     // chain of single-cell diagonals
+        const i = 1 + Math.floor(Math.random() * (GCOLS / 2));                   // target intersection, in grid units
+        const j = 1 + Math.floor(Math.random() * (GROWS / 2));
+        return [dx, dy, st, i, j];
+      });                                                                         // 2 to 8 strands
     }
     setInterval(pickDiagCells, 2500);
+
+    // Calls cb(x0, y0, x1, y1, seed, cellEnergy) for every diagonal segment of every active arm
+    function forEachArmSeg(cellE, cb) {
+      const ic = GCOLS / 2, ir = GROWS / 2;   // centre intersection (grid line crossing)
+      const cellAt = (ci, ri) => (ci >= 0 && ci < GCOLS && ri >= 0 && ri < GROWS) ? cellE[ri * GCOLS + ci] : 0;
+      diagArms.forEach(([dx, dy, st, ti, tj], a) => {
+        if (ti > 0) {   // one long line from the centre intersection to grid intersection (ti, tj) in this quadrant
+          const x0 = ic * CW, y0 = ir * CH;
+          const x1 = (ic + dx * ti) * CW, y1 = (ir + dy * tj) * CH;
+          const e = (cellAt(dx > 0 ? ic : ic - 1, dy > 0 ? ir : ir - 1) +
+                     cellAt(dx > 0 ? ic + ti - 1 : ic - ti, dy > 0 ? ir + tj - 1 : ir - tj)) / 2;
+          cb(x0, y0, x1, y1, a * 3.1 + st * 2.9 + ti * 1.3 + tj * 0.7, e);
+          return;
+        }
+        for (let k = 0; k < Math.max(GCOLS, GROWS); k++) {
+          const x0 = (ic + dx * k) * CW, y0 = (ir + dy * k) * CH;
+          const x1 = x0 + dx * CW,       y1 = y0 + dy * CH;
+          if (x1 < -1 || x1 > W + 1 || y1 < -1 || y1 > H + 1) break;
+          const ci = dx > 0 ? ic + k : ic - 1 - k;
+          const ri = dy > 0 ? ir + k : ir - 1 - k;
+          cb(x0, y0, x1, y1, a * 3.1 + k * 2.3 + st * 2.9, cellAt(ci, ri));
+        }
+      });
+    }
 
     function initCenterAlpha() {
       centerAlpha = [];
@@ -193,8 +217,32 @@
           centerAlpha[ri][ci] = 0.25 + Math.random() * 0.55;
     }
 
+    // Wavy diagonal: polyline along the cell diagonal displaced perpendicular by two travelling sines.
+    // Ends and midpoint stay pinned (sin^2(2*pi*t) window) so the line always passes through the cell centre dot;
+    // amplitude and wave speed follow the sound.
+    let diagPhase = 0;
+    function wavyDiag(x0, y0, x1, y1, seed, de) {
+      const dx = x1 - x0, dy = y1 - y0;
+      const len = Math.hypot(dx, dy) || 1;
+      const nx = -dy / len, ny = dx / len;
+      const amp = Math.min(CH * 0.28, CH * (0.025 + ampLevel * 0.14 + de * 0.22));
+      const cells = Math.max(1, len / Math.hypot(CW, CH));   // length in single-cell diagonals
+      const N = Math.round(28 * cells);
+      ctx.beginPath();
+      for (let k = 0; k <= N; k++) {
+        const t = k / N;
+        const w = Math.sin(t * 9.4 * cells + seed + diagPhase) * 0.7 + Math.sin(t * 20.1 * cells - seed * 1.7 - diagPhase * 1.6) * 0.3;
+        const win = Math.sin(2 * Math.PI * t); // zero at both corners and the cell centre
+        const off = amp * w * win * win;
+        const x = x0 + dx * t + nx * off, y = y0 + dy * t + ny * off;
+        if (k === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+
     // ── Draw frame ─────────────────────────────────────────────────
     function drawFrame(now) {
+      diagPhase += 0.025 + ampLevel * 0.12;
       ctx.clearRect(0, 0, W, H);
       ctx.fillStyle = '#000';
       ctx.fillRect(0, 0, W, H);
@@ -249,13 +297,10 @@
       ctx.shadowColor = lineColor;
       ctx.strokeStyle = lineColor;
       ctx.lineWidth   = 1.0;
-      for (const { ci, ri, dir } of diagCells) {
-        const de = cellE[ri * GCOLS + ci];
-        const x0 = ci * CW + (dir === 0 ? 0 : CW), y0 = ri * CH;
-        const x1 = ci * CW + (dir === 0 ? CW : 0),  y1 = (ri + 1) * CH;
+      forEachArmSeg(cellE, (x0, y0, x1, y1, seed, de) => {
         ctx.globalAlpha = 0.12 + de * 0.55;
-        ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
-      }
+        wavyDiag(x0, y0, x1, y1, seed, de);
+      });
       ctx.restore();
 
       // Highlight chars — glow pass
@@ -301,13 +346,10 @@
       ctx.save();
       ctx.strokeStyle = lineColor;
       ctx.lineWidth   = 0.6;
-      for (const { ci, ri, dir } of diagCells) {
-        const de = cellE[ri * GCOLS + ci];
-        const x0 = ci * CW + (dir === 0 ? 0 : CW), y0 = ri * CH;
-        const x1 = ci * CW + (dir === 0 ? CW : 0),  y1 = (ri + 1) * CH;
+      forEachArmSeg(cellE, (x0, y0, x1, y1, seed, de) => {
         ctx.globalAlpha = 0.20 + de * 0.65;
-        ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
-      }
+        wavyDiag(x0, y0, x1, y1, seed, de);
+      });
       ctx.restore();
 
       // Highlight chars — sharp pass
@@ -343,7 +385,7 @@
             setTimeout(() => {
               const start  = performance.now();
               const expiry = start + 1800;
-              const seg = { x, y, color, char: String.fromCodePoint(0x2801 + Math.floor(Math.random() * 64)), start, expiry };
+              const seg = { x, y, color, char: String(Math.floor(Math.random() * 10)), start, expiry };
               segments.push(seg);
               setTimeout(() => { segments = segments.filter(s => s !== seg); }, 1800);
             }, delay);
@@ -374,6 +416,22 @@
     window.addEventListener('resize', resize);
 
     // ── Main loop ──────────────────────────────────────────────────
+    // D: audio debug readout (rms, bass, avg, sd, dev, beat, amp) next to the zko link
+    const _dbg = { rms: 0, b: 0, avg: 0, sd: 0, dev: 0, beat: 0 };
+    let _dbgEl = null;
+    window.addEventListener('keydown', e => {
+      if ((e.key !== 'd' && e.key !== 'D') || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (_dbgEl) { _dbgEl.remove(); _dbgEl = null; return; }
+      _dbgEl = document.createElement('div'); _dbgEl.id = 'dbg'; document.body.appendChild(_dbgEl);
+      (function tick() {
+        if (!_dbgEl) return;
+        const z = document.getElementById('zko');
+        _dbgEl.textContent = `${_dbg.rms.toFixed(3)} ${_dbg.b.toFixed(0)} ${_dbg.avg.toFixed(0)} ${_dbg.sd.toFixed(1)} ${_dbg.dev.toFixed(1)} ${_dbg.beat.toFixed(2)} ${(typeof ampLevel === 'number' ? ampLevel : 0).toFixed(2)}`;
+        if (z && z.style.color) _dbgEl.style.color = z.style.color;
+        requestAnimationFrame(tick);
+      })();
+    });
+
     // Bass-band beat detector (same as 32_julia): bass level vs its ~1s running mean, scaled by the music's own variation.
     // Level-invariant, so steady speaker->mic music still produces pulses. Returns 0..1.
     let _fBuf = null, _bAvg = -1, _bVar = 16, _bWarm = 0, _bLast = 0;
@@ -398,7 +456,9 @@
       _bVar += (dev * dev - _bVar) * 0.015;
       if (_bWarm > 0) { _bWarm--; return 0; }
       const sd = Math.sqrt(_bVar);
-      return Math.max(0, Math.min(1, (dev - Math.max(3, sd * 0.8)) / Math.max(8, sd * 1.7)));
+      const _bt = Math.max(0, Math.min(1, (dev - Math.max(3, sd * 0.8)) / Math.max(8, sd * 1.7)));
+      _dbg.b = b; _dbg.avg = _bAvg; _dbg.sd = sd; _dbg.dev = dev; _dbg.beat = _bt;
+      return _bt;
     }
 
     function frame(now) {
@@ -411,12 +471,14 @@
           const d = timeDomain[i] / 255 - 0.5; sumSq += d * d;
         }
         const rms = Math.max(Math.sqrt(sumSq / timeDomain.length), beatLevel() * 0.1);
+        _dbg.rms = rms;
         ampLevel = ampLevel * 0.82 + rms * 0.18;
         if (rms > 0.04 && !ampWasHigh) { triggerRipple(); ampWasHigh = true; }
         if (rms < 0.024) ampWasHigh = false;
       } else if (parentAudio) {
         activeFreq = parentAudio.freqData || null;
         const rms = Math.max(parentAudio.rms || 0, beatLevel() * 0.1);
+        _dbg.rms = rms;
         ampLevel = ampLevel * 0.90 + rms * 0.10;
         if (rms > 0.04 && !ampWasHigh) { triggerRipple(); ampWasHigh = true; }
         if (rms < 0.024) ampWasHigh = false;
@@ -456,11 +518,11 @@
       legendSpans.forEach(s => s.textContent = rc());
       opsEl.textContent = rc() + rc() + rc() + rc() + rc();
       zkoEl.textContent = rc() + rc() + rc();
-      btn.textContent   = rb();
+      btn.textContent   = rn();
     }, 140);
 
     // ── Mic toggle ─────────────────────────────────────────────────
-    btn.textContent = rb();
+    btn.textContent = rn();
     btn.addEventListener('click', async () => {
       if (micActive) {
         micStream?.getTracks().forEach(t => t.stop());
