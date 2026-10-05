@@ -157,45 +157,49 @@
     // Active highlight chars: { x, y, color, char, start, expiry }
     let segments = [];
 
-    // Wavy arms: each starts at the centre-most grid intersection and heads out into one of the 4 quadrants.
-    // Every quadrant has 2 strands with different wave phases (so up to 8 lines; 2-8 shown at a time).
-    // A strand is either a chain of single-cell diagonals out to the edge, or ONE long line from the centre to any
-    // grid intersection in its quadrant (so it can stretch between the corners of 2+ cells, at shallower/steeper angles).
+    // Wavy arms: all strands share ONE start intersection, picked at random along the CENTRE horizontal grid line
+    // (the GCOLS-1 interior points; the two outer edge points are not used) each time, and fan out diagonally up or down, left or right.
+    // Each quadrant-direction has 2 strands with different wave phases (so up to 8 lines; 2-8 shown at a time).
+    // A strand is either a chain of single-cell diagonals out to the edge, or ONE long line to any grid intersection
+    // in its direction (so it can stretch between the corners of 2+ cells, at shallower/steeper angles).
     const ARM_DIRS = [[1, 1], [1, -1], [-1, 1], [-1, -1]];
     const STRANDS  = 2;
     const ALL_ARMS = ARM_DIRS.flatMap(([dx, dy]) => Array.from({ length: STRANDS }, (_, st) => [dx, dy, st]));
     let diagArms = [];
     function pickDiagCells() {
       const order = ALL_ARMS.map(a => a).sort(() => Math.random() - 0.5);
-      diagArms = order.slice(0, 2 + Math.floor(Math.random() * 7)).map(([dx, dy, st]) => {
-        if (Math.random() < 0.45) return [dx, dy, st, 0, 0];                     // chain of single-cell diagonals
-        const i = 1 + Math.floor(Math.random() * (GCOLS / 2));                   // target intersection, in grid units
+      const sc = 1 + Math.floor(Math.random() * (GCOLS - 1));                    // ONE start intersection on the centre row (interior points only, not the two outer ones), shared by every line
+      diagArms = order.slice(0, 2 + Math.floor(Math.random() * 7)).map(([dx0, dy, st]) => {
+        const dx = dx0;
+        if (Math.random() < 0.45) return [dx, dy, st, 0, 0, sc];                 // chain of single-cell diagonals
+        const maxI = dx > 0 ? GCOLS - sc : sc;                                   // columns available in that direction
+        const i = 1 + Math.floor(Math.random() * maxI);                          // target intersection, in grid units
         const j = 1 + Math.floor(Math.random() * (GROWS / 2));
-        return [dx, dy, st, i, j];
+        return [dx, dy, st, i, j, sc];
       });                                                                         // 2 to 8 strands
     }
     setInterval(pickDiagCells, 2500);
 
     // Calls cb(x0, y0, x1, y1, seed, cellEnergy) for every diagonal segment of every active arm
     function forEachArmSeg(cellE, cb) {
-      const ic = GCOLS / 2, ir = GROWS / 2;   // centre intersection (grid line crossing)
+      const ir = GROWS / 2;                   // centre horizontal grid line
       const cellAt = (ci, ri) => (ci >= 0 && ci < GCOLS && ri >= 0 && ri < GROWS) ? cellE[ri * GCOLS + ci] : 0;
-      diagArms.forEach(([dx, dy, st, ti, tj], a) => {
-        if (ti > 0) {   // one long line from the centre intersection to grid intersection (ti, tj) in this quadrant
-          const x0 = ic * CW, y0 = ir * CH;
-          const x1 = (ic + dx * ti) * CW, y1 = (ir + dy * tj) * CH;
-          const e = (cellAt(dx > 0 ? ic : ic - 1, dy > 0 ? ir : ir - 1) +
-                     cellAt(dx > 0 ? ic + ti - 1 : ic - ti, dy > 0 ? ir + tj - 1 : ir - tj)) / 2;
-          cb(x0, y0, x1, y1, a * 3.1 + st * 2.9 + ti * 1.3 + tj * 0.7, e);
+      diagArms.forEach(([dx, dy, st, ti, tj, sc], a) => {
+        if (ti > 0) {   // one long line from the start intersection to grid intersection (sc + dx*ti, ir + dy*tj)
+          const x0 = sc * CW, y0 = ir * CH;
+          const x1 = (sc + dx * ti) * CW, y1 = (ir + dy * tj) * CH;
+          const e = (cellAt(dx > 0 ? sc : sc - 1, dy > 0 ? ir : ir - 1) +
+                     cellAt(dx > 0 ? sc + ti - 1 : sc - ti, dy > 0 ? ir + tj - 1 : ir - tj)) / 2;
+          cb(x0, y0, x1, y1, a * 3.1 + st * 2.9 + ti * 1.3 + tj * 0.7 + sc * 0.9, e);
           return;
         }
         for (let k = 0; k < Math.max(GCOLS, GROWS); k++) {
-          const x0 = (ic + dx * k) * CW, y0 = (ir + dy * k) * CH;
+          const x0 = (sc + dx * k) * CW, y0 = (ir + dy * k) * CH;
           const x1 = x0 + dx * CW,       y1 = y0 + dy * CH;
           if (x1 < -1 || x1 > W + 1 || y1 < -1 || y1 > H + 1) break;
-          const ci = dx > 0 ? ic + k : ic - 1 - k;
+          const ci = dx > 0 ? sc + k : sc - 1 - k;
           const ri = dy > 0 ? ir + k : ir - 1 - k;
-          cb(x0, y0, x1, y1, a * 3.1 + k * 2.3 + st * 2.9, cellAt(ci, ri));
+          cb(x0, y0, x1, y1, a * 3.1 + k * 2.3 + st * 2.9 + sc * 0.9, cellAt(ci, ri));
         }
       });
     }
