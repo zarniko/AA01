@@ -149,6 +149,7 @@
     const RING_DELAY = 120; // ms between rings
     const OFFSETS = [[-1,-1],[0,-1],[1,-1],[-1,0],[1,0],[-1,1],[0,1],[1,1]];
     const STEP_F  = 0.22;
+    const ELL_F   = 0.5;   // ellipse semi-axes as a fraction of a cell (0.5 = touches the midpoints of the grid segments meeting at its centre)
 
     // Center dot flicker state: alpha per cell, randomized each 140ms
     let centerAlpha = [];
@@ -166,9 +167,11 @@
     const STRANDS  = 2;
     const ALL_ARMS = ARM_DIRS.flatMap(([dx, dy]) => Array.from({ length: STRANDS }, (_, st) => [dx, dy, st]));
     let diagArms = [];
+    let diagSc   = GCOLS / 2;   // current shared start column; the centre ellipse is drawn around this intersection
     function pickDiagCells() {
       const order = ALL_ARMS.map(a => a).sort(() => Math.random() - 0.5);
       const sc = 1 + Math.floor(Math.random() * (GCOLS - 1));                    // ONE start intersection on the centre row (interior points only, not the two outer ones), shared by every line
+      diagSc = sc;
       diagArms = order.slice(0, 2 + Math.floor(Math.random() * 7)).map(([dx0, dy, st]) => {
         const dx = dx0;
         if (Math.random() < 0.45) return [dx, dy, st, 0, 0, sc];                 // chain of single-cell diagonals
@@ -244,6 +247,30 @@
       ctx.stroke();
     }
 
+    // Concentric ellipses around the line start point (diagSc, centre row). Ellipse n has semi-axes n*CW/2 x n*CH/2, so
+    // its horizontal tips land alternately on a grid-line MIDPOINT (odd n: 0.5, 1.5, ...) and a grid INTERSECTION
+    // (even n: 1, 2, ...) along the centre row as it grows. Even (intersection) ellipses are a touch brighter, outer ones
+    // fade, and a slow ripple runs outward with the sound-driven phase. Drawn as crawling dots (round-capped dashes).
+    const ELL_MAX = 10;
+    function drawStartEllipses(baseAlpha) {
+      const cx = diagSc * CW, cy = H / 2;
+      const reach = Math.max(diagSc, GCOLS - diagSc);                 // columns to the farther page edge
+      const nMax  = Math.min(ELL_MAX, Math.round(reach / ELL_F));      // stop once the tips pass the far edge
+      ctx.save();
+      ctx.lineCap = 'round';
+      ctx.setLineDash([0.1, 6]);                                       // round caps turn the near-zero dashes into dots
+      for (let n = 1; n <= nMax; n++) {
+        ctx.lineDashOffset = (n % 2 ? -1 : 1) * diagPhase * 14;       // dots crawl around each ring, alternating direction; faster with sound
+        const fade = 1 / (1 + 0.13 * (n - 1));
+        const ripple = 0.8 + 0.2 * Math.sin(n * 0.9 - diagPhase * 1.5);
+        ctx.globalAlpha = Math.min(1, baseAlpha * fade * ripple * (n % 2 === 0 ? 1.25 : 1));
+        ctx.beginPath();
+        ctx.ellipse(cx, cy, CW * ELL_F * n, CH * ELL_F * n, 0, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
     // ── Draw frame ─────────────────────────────────────────────────
     function drawFrame(now) {
       diagPhase += 0.025 + ampLevel * 0.12;
@@ -284,6 +311,10 @@
       for (let ci = 0; ci <= GCOLS; ci++) { ctx.moveTo(ci * CW, 0); ctx.lineTo(ci * CW, H); }
       for (let ri = 0; ri <= GROWS; ri++) { ctx.moveTo(0, ri * CH); ctx.lineTo(W, ri * CH); }
       ctx.stroke();
+
+      // Concentric ellipses around the line start point; they hop with the wavy lines every time those are re-picked
+      ctx.lineWidth = 1.8;                       // dot diameter (round caps), glow pass
+      drawStartEllipses(0.30 + ampLevel * 0.25);
 
       // Center dots — radius and alpha driven by per-cell frequency energy
       for (let ri = 0; ri < GROWS; ri++) {
@@ -334,6 +365,10 @@
       for (let ci = 0; ci <= GCOLS; ci++) { ctx.moveTo(ci * CW, 0); ctx.lineTo(ci * CW, H); }
       for (let ri = 0; ri <= GROWS; ri++) { ctx.moveTo(0, ri * CH); ctx.lineTo(W, ri * CH); }
       ctx.stroke();
+
+      // Concentric ellipses (see glow pass)
+      ctx.lineWidth = 1.2;                       // dot diameter, sharp pass
+      drawStartEllipses(0.60 + ampLevel * 0.22);
 
       // Center dots — radius and alpha driven by per-cell frequency energy
       for (let ri = 0; ri < GROWS; ri++) {
