@@ -647,22 +647,36 @@
     let _micStream = null, _audioCtx = null, _analyser = null;
     let _timeDomain = null, _freqData = null, _parentMicActive = false;
     let _sysStream = null, _sysActive = false;
+    // Mic-only adaptive gain: slowly steers the mic's rms toward MIC_TARGET so quiet and loud speakers
+    // (and different distances) land in the same range as tab capture. Slow on purpose: no pumping after claps.
+    const MIC_TARGET = 0.03;
+    let _micGain = null, _micGainVal = 1, _micAvg = MIC_TARGET;
 
     function _teardownAudio() {
       _micStream?.getTracks().forEach(t => t.stop()); _micStream = null;
       _sysStream?.getTracks().forEach(t => t.stop()); _sysStream = null;
       _audioCtx?.close(); _audioCtx = _analyser = _timeDomain = _freqData = null;
+      _micGain = null; _micGainVal = 1; _micAvg = MIC_TARGET;
       _parentMicActive = false; _sysActive = false;
       document.getElementById('micbtn').textContent = 'M';
       document.getElementById('abtn').textContent   = 'A';
     }
 
-    function _setupAnalyser(stream) {
+    function _setupAnalyser(stream, adaptGain = false) {
       _audioCtx   = new (window.AudioContext || window.webkitAudioContext)();
       const src   = _audioCtx.createMediaStreamSource(stream);
       _analyser   = _audioCtx.createAnalyser();
       _analyser.fftSize = 2048; _analyser.smoothingTimeConstant = 0.5;
-      src.connect(_analyser);
+      if (adaptGain) {
+        _micGain = _audioCtx.createGain(); _micGainVal = 1; _micAvg = MIC_TARGET;
+        // Gentle limiter after the gain so a loud clap can't clip
+        const lim = _audioCtx.createDynamicsCompressor();
+        lim.threshold.value = -3; lim.knee.value = 0; lim.ratio.value = 20;
+        lim.attack.value = 0.003; lim.release.value = 0.1;
+        src.connect(_micGain); _micGain.connect(lim); lim.connect(_analyser);
+      } else {
+        src.connect(_analyser);
+      }
       _timeDomain = new Uint8Array(_analyser.fftSize);
       _freqData   = new Uint8Array(_analyser.frequencyBinCount);
     }
@@ -671,8 +685,11 @@
       if (_parentMicActive) { _teardownAudio(); return; }
       try {
         _teardownAudio();
-        _micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-        _setupAnalyser(_micStream);
+        _micStream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: false, noiseSuppression: false },
+          video: false
+        });
+        _setupAnalyser(_micStream, true);
         _parentMicActive = true;
       } catch {}
     });
@@ -701,6 +718,11 @@
           const d = _timeDomain[k] / 255 - 0.5; sq += d * d;
         }
         const rms = Math.sqrt(sq / _timeDomain.length);
+        if (_micGain && rms > 0.004) {                       // hold gain in silence (don't amplify room noise)
+          _micAvg += (rms - _micAvg) * 0.01;                 // ~1.7s level average
+          _micGainVal = Math.min(10, Math.max(0.2, _micGainVal * Math.pow(MIC_TARGET / _micAvg, 0.006)));
+          _micGain.gain.value = _micGainVal;
+        }
         const msg = { type: 'audioData', rms, freqData: Array.from(_freqData) };
         rowPaneEls.flat().forEach(p => {
           try { p.querySelector('iframe').contentWindow.postMessage(msg, '*'); } catch {}
