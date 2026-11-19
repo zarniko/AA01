@@ -301,14 +301,15 @@
     });
 
     // ── canvas resize ─────────────────────────────────────────
-    // Render at 40% of viewport — CSS scales it back to 100%
-    const SCALE = 0.4;
+    // Render soft glow at 25% of viewport — CSS bilinear-upscales to 100%, hud-cv stays 1:1
+    const SCALE = 0.25;
 
     // Per-column precomputed arc data (re-filled on resize)
     let arcPyArr  = new Float32Array(1);
     let ntArrCol  = new Float32Array(1);
     let edgeBAArr = new Float32Array(1);
     let validCol  = new Uint8Array(1);
+    let _imgData  = null;
 
     function resize() {
       hudCv.width   = window.innerWidth;
@@ -316,6 +317,7 @@
       canvas.width  = Math.round(window.innerWidth  * SCALE);
       canvas.height = Math.round(window.innerHeight * SCALE);
       const W = canvas.width, H = canvas.height;
+      _imgData = ctx.createImageData(W, H);
 
       arcPyArr  = new Float32Array(W);
       ntArrCol  = new Float32Array(W);
@@ -366,37 +368,40 @@
       // Tighter, moodier Gaussian widths (less washed-out glow)
       const SIGMA_CORE = H * 0.095;
       const SIGMA_GLOW = H * 0.28;
-      const SC2 = 2 * SIGMA_CORE * SIGMA_CORE;
-      const SG2 = 2 * SIGMA_GLOW * SIGMA_GLOW;
+      const invSC2 = 1 / (2 * SIGMA_CORE * SIGMA_CORE);
+      const invSG2 = 1 / (2 * SIGMA_GLOW * SIGMA_GLOW);
+      const invSC  = 1 / SIGMA_CORE;
+      const maxNd2 = 2 * SIGMA_GLOW * SIGMA_GLOW * 4.0; // early-out before Math.exp
 
-      const data = ctx.createImageData(W, H);
-      const pix  = data.data;
+      if (!_imgData || _imgData.width !== W || _imgData.height !== H) _imgData = ctx.createImageData(W, H);
+      const pix = _imgData.data;
+      pix.fill(0);
 
       for (let py = 0; py < H; py++) {
         const rowOff = py * W * 4;
 
         for (let px = 0; px < W; px++) {
-          if (!validCol[px]) continue;
-
           const nd  = py - arcPyArr[px];   // signed distance from arc (neg = above)
           const nd2 = nd * nd;
+          if (nd2 > maxNd2) continue;
 
           // Two-gaussian brightness: tight core + subtle outer halo
-          const bCore  = Math.exp(-nd2 / SC2);
-          const bGlow  = Math.exp(-nd2 / SG2) * 0.16;
+          const bCore  = nd2 < 2 * SIGMA_CORE * SIGMA_CORE * 5.0 ? Math.exp(-nd2 * invSC2) : 0;
+          const bGlow  = Math.exp(-nd2 * invSG2) * 0.16;
           const rawB   = globalPulse * (bCore + bGlow);
-          if (rawB < 0.003) continue;
+          if (rawB < 0.004) continue;
 
           // Overlapping shimmer waves — iridescent scintillation
           const nt  = ntArrCol[px];
-          const ndN = nd / SIGMA_CORE;     // normalized distance
+          const ndN = nd * invSC;
 
           const shim =
             Math.sin(t * 2.1 + nt * 7.0 + ndN * 3.5) * 0.10 +
             Math.sin(t * 3.4 - nt * 4.5 + ndN * 2.2) * 0.07 +
-            Math.sin(t * 1.6 + nt * 11.0             ) * 0.05;
+            Math.sin(t * 1.6 + nt * 11.0            ) * 0.05;
 
-          const b = Math.pow(Math.min(0.75, Math.max(0, rawB * (1 + shim))), 1.25);
+          const b0 = Math.min(0.75, Math.max(0, rawB * (1 + shim)));
+          const b  = b0 * (0.72 + 0.28 * b0);
           if (b < 0.003) continue;
 
           // Deeper saturated iridescent color model (avoids white blowout)
@@ -412,19 +417,17 @@
           g  = g  * (1 - tintStr) + tintG * tintStr;
           bl = bl * (1 - tintStr) + tintB * tintStr;
 
-          // Square-law alpha fade — effective because dim outer pixels are now
-          // genuinely below 0.18 (glow fades to near-zero at screen corners)
           const alpha = b < 0.18 ? (b / 0.18) * (b / 0.18) : 1.0;
 
           const idx    = rowOff + px * 4;
-          pix[idx]     = Math.round(Math.max(0, Math.min(255, r  * b * 255)));
-          pix[idx + 1] = Math.round(Math.max(0, Math.min(255, g  * b * 255)));
-          pix[idx + 2] = Math.round(Math.max(0, Math.min(255, bl * b * 255)));
-          pix[idx + 3] = Math.round(alpha * 255);
+          pix[idx]     = (r  * b * 255) | 0;
+          pix[idx + 1] = (g  * b * 255) | 0;
+          pix[idx + 2] = (bl * b * 255) | 0;
+          pix[idx + 3] = (alpha * 255) | 0;
         }
       }
 
-      ctx.putImageData(data, 0, 0);
+      ctx.putImageData(_imgData, 0, 0);
       drawShimmerAnnotations(t, W, H, SIGMA_CORE, SIGMA_GLOW, globalPulse);
     }
 
@@ -617,9 +620,13 @@
     }
 
     // ── loop ─────────────────────────────────────────────────
+    let _lastLoopTs = 0;
     function loop(ts) {
-      micActive ? micTick(ts) : idleTick(ts);
       requestAnimationFrame(loop);
+      if (ts - _lastLoopTs < 15) return; // cap ~66fps on 120Hz displays
+      _lastLoopTs = ts;
+      micActive ? micTick(ts) : idleTick(ts);
+      drawGrainFrame(ts);
     }
 
     // ── T key: brightness pulse ───────────────────────────────
@@ -630,35 +637,46 @@
     document.getElementById('tkey').addEventListener('click', triggerPulse);
     canvas.addEventListener('click', triggerPulse);
 
-    // ── Grain ────────────────────────────────────────────────
+    // ── Grain (pre-baked 4 frames, cycled at 30fps) ──────────
     let grainOn  = true;
     const grainEl = document.getElementById('grain-cv');
     const grainCx = grainEl.getContext('2d');
-    let grainImg  = null;
-    function drawGrainFrame() {
-      if (!grainOn) return;
+    const GRAIN_N = 4;
+    const _grainImgs = [];
+    let _grainIdx = 0, _grainLastTs = 0;
+
+    function prebakeGrain() {
       const gW = Math.ceil(window.innerWidth  / 2);
       const gH = Math.ceil(window.innerHeight / 2);
-      if (grainEl.width !== gW || grainEl.height !== gH) {
-        grainEl.width  = gW;
-        grainEl.height = gH;
-        grainImg = grainCx.createImageData(gW, gH);
+      grainEl.width  = gW;
+      grainEl.height = gH;
+      _grainImgs.length = 0;
+      for (let f = 0; f < GRAIN_N; f++) {
+        const img = grainCx.createImageData(gW, gH);
+        const data = img.data;
+        for (let i = 0; i < data.length; i += 4) {
+          const v = Math.random() * 255 | 0;
+          data[i] = data[i+1] = data[i+2] = v;
+          data[i+3] = Math.random() * 30 | 0;
+        }
+        _grainImgs.push(img);
       }
-      const data = grainImg.data;
-      for (let i = 0; i < data.length; i += 4) {
-        const v = Math.random() * 255 | 0;
-        data[i] = data[i+1] = data[i+2] = v;
-        data[i+3] = Math.random() * 30 | 0;
+    }
+    function drawGrainFrame(ts = 0) {
+      if (!grainOn || !_grainImgs.length) return;
+      if (ts - _grainLastTs >= 33) {
+        grainCx.putImageData(_grainImgs[_grainIdx], 0, 0);
+        _grainIdx = (_grainIdx + 1) % GRAIN_N;
+        _grainLastTs = ts;
       }
-      grainCx.putImageData(grainImg, 0, 0);
-      requestAnimationFrame(drawGrainFrame);
     }
     function toggleGrain() {
       grainOn = !grainOn;
-      if (grainOn) drawGrainFrame();
+      if (!grainOn) grainCx.clearRect(0, 0, grainEl.width, grainEl.height);
     }
+    window.addEventListener('resize', prebakeGrain);
     window.addEventListener('keydown', e => { if (e.key === 'g' || e.key === 'G') toggleGrain(); });
-    drawGrainFrame();
+    prebakeGrain();
 
     // ── mic toggle ───────────────────────────────────────────
     btn.addEventListener('click', async () => {
