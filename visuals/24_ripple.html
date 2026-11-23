@@ -282,40 +282,48 @@
       dashOff -= 0.35;
       const swirls = findSwirls();
       const cellSz = Math.min(W, H) / 20;
-      const GN     = 3;
-      const baseA  = Math.min(1, 0.48 + gridPulse * 0.42 + ampLevel * 0.15);
+      const baseA  = Math.min(1, 0.78 + gridPulse * 0.22 + ampLevel * 0.15);
       const uiCol  = lineColor;
 
       ctx.save();
       ctx.shadowColor = uiCol;
-      ctx.shadowBlur  = 6;
-      ctx.setLineDash([3, 5]);
-      ctx.lineDashOffset = dashOff;
-      ctx.lineWidth = 1.0;
+      ctx.shadowBlur  = 8;
 
       for (const s of swirls) {
         const n  = Math.max(1, Math.min(4, Math.ceil(Math.abs(s.h) * 4)));
         const x0 = s.x - cellSz * n / 2;
         const y0 = s.y - cellSz * n / 2;
+        const sz = n * cellSz;
 
+        // Solid outer border
+        ctx.setLineDash([]);
+        ctx.lineWidth   = 1.15;
         ctx.strokeStyle = hexToRgba(uiCol, baseA);
-        for (let k = 0; k <= n; k++) {
-          ctx.beginPath(); ctx.moveTo(x0 + k*cellSz, y0); ctx.lineTo(x0 + k*cellSz, y0 + n*cellSz); ctx.stroke();
-          ctx.beginPath(); ctx.moveTo(x0, y0 + k*cellSz); ctx.lineTo(x0 + n*cellSz, y0 + k*cellSz); ctx.stroke();
+        ctx.strokeRect(x0, y0, sz, sz);
+
+        // Dotted inner grid lines
+        if (n > 1) {
+          ctx.setLineDash([3, 4]);
+          ctx.lineDashOffset = dashOff;
+          ctx.lineWidth      = 0.95;
+          ctx.beginPath();
+          for (let k = 1; k < n; k++) {
+            ctx.moveTo(x0 + k*cellSz, y0); ctx.lineTo(x0 + k*cellSz, y0 + sz);
+            ctx.moveTo(x0, y0 + k*cellSz); ctx.lineTo(x0 + sz, y0 + k*cellSz);
+          }
+          ctx.stroke();
         }
 
         ctx.setLineDash([]);
-        ctx.fillStyle = hexToRgba(uiCol, baseA + 0.18);
+        ctx.fillStyle = hexToRgba(uiCol, Math.min(1, baseA + 0.18));
         for (let kj = 0; kj <= n; kj++)
           for (let ki = 0; ki <= n; ki++)
-            ctx.fillRect(x0 + ki*cellSz - 1, y0 + kj*cellSz - 1, 2, 2);
+            ctx.fillRect(x0 + ki*cellSz - 1.5, y0 + kj*cellSz - 1.5, 3, 3);
 
         ctx.font = '14px "Roboto Mono", monospace';
         ctx.textAlign = 'center';
         const val = (Math.abs(s.h) * 100 | 0).toString().padStart(2, '0');
         ctx.fillText((s.sign > 0 ? '+' : '-') + val, s.x, s.y + 5);
-        ctx.setLineDash([3, 5]);
-        ctx.lineDashOffset = dashOff;
       }
 
       ctx.restore();

@@ -139,7 +139,7 @@
   // Low-res offscreen canvas — rendered at 1/RES, scaled up for free smoothing blur
   const lowCv  = document.createElement('canvas');
   const lowCtx = lowCv.getContext('2d');
-  const RES    = 6;
+  const RES    = 8;
   let   imgData = null;
 
   function resize() {
@@ -152,23 +152,21 @@
   resize();
   window.addEventListener('resize', resize);
 
-  // ── Blob color sources ────────────────────────────────────
-  // Each drifts on independent Lissajous-like trajectories.
-  // bx/by: base position [0,1]   px/py: phase offset
-  // fx/fy: drift frequency        ax/ay: drift amplitude
-  // r/g/b: current color          tr/tg/tb: target color (morphed by VGA clicks)
-  const BLOBS = [
-    { bx:0.20, by:0.30, px:0.00, py:1.20, fx:0.31, fy:0.27, ax:0.32, ay:0.28, r:64,  g:64,  b:255, tr:64,  tg:64,  tb:255 },
-    { bx:0.72, by:0.38, px:2.10, py:0.50, fx:0.23, fy:0.34, ax:0.28, ay:0.32, r:255, g:150, b:185, tr:255, tg:150, tb:185 },
-    { bx:0.50, by:0.72, px:1.00, py:3.00, fx:0.19, fy:0.41, ax:0.38, ay:0.24, r:155, g:55,  b:255, tr:155, tg:55,  tb:255 },
-    { bx:0.28, by:0.58, px:4.20, py:1.80, fx:0.37, fy:0.22, ax:0.24, ay:0.38, r:80,  g:110, b:255, tr:80,  tg:110, tb:255 },
-    { bx:0.80, by:0.22, px:0.70, py:2.60, fx:0.28, fy:0.33, ax:0.32, ay:0.28, r:255, g:110, b:155, tr:255, tg:110, tb:155 },
-    { bx:0.50, by:0.15, px:3.50, py:0.90, fx:0.42, fy:0.29, ax:0.20, ay:0.32, r:30,  g:28,  b:175, tr:30,  tg:28,  tb:175 },
-  ];
+  // ── Circular blob state (restrained tint + organic harmonic rim) ─
+  let tintR = 0.33, tintG = 0.85, tintB = 0.95;
+  let targR = 0.33, targG = 0.85, targB = 0.95;
+  let colorIdx = 11;
 
-  let t         = 0;
-  let driftRate = 0.009; // base blob drift speed; shift+arrows adjust
-  let morphIdx  = 0;     // which blob next VGA click targets
+  function setBlobTint(r, g, b) {
+    targR = r / 255;
+    targG = g / 255;
+    targB = b / 255;
+  }
+
+  let t           = 0;
+  let driftRate   = 0.014; // base harmonic phase speed
+  let pulseTarget = 0;
+  let ampSmooth   = 0;
 
   // ── Audio ─────────────────────────────────────────────────
   let analyser = null, timeDomain = null;
@@ -222,11 +220,23 @@
     return _bt;
   }
 
-  function frame() {
+  function blobWobble(ang, tt, amp) {
+    return 1
+      + (0.10 + amp * 0.06) * Math.sin(2 * ang + tt * 0.85)
+      + (0.07 + amp * 0.05) * Math.cos(3 * ang - tt * 0.65)
+      + (0.04 + amp * 0.03) * Math.sin(5 * ang + tt * 1.15);
+  }
+
+  let _lastFrameTs = 0;
+  function frame(ts = 0) {
+    requestAnimationFrame(frame);
+    if (ts - _lastFrameTs < 20) return;
+    _lastFrameTs = ts;
+
     const lowW = lowCv.width;
     const lowH = lowCv.height;
 
-    // Audio RMS → ampLevel and speed bump
+    // Audio RMS → ampLevel and organic swell
     if (micActive || parentAudio) {
       let rms;
       if (micActive) {
@@ -238,106 +248,221 @@
         }
         rms = Math.sqrt(sq / timeDomain.length);
       } else { rms = parentAudio.rms; }
-      rms = Math.max(rms, beatLevel() * 0.1);   // raw level (claps, loud tab audio) or beat pulse, whichever is larger
+      rms = Math.max(rms, beatLevel() * 0.1);
       _dbg.rms = rms;
-      ampLevel += (rms * 6 - ampLevel) * 0.15;
-      if (rms > 0.06) speedBump = Math.max(speedBump, rms * 0.12);
+      ampLevel += (rms * 5 - ampLevel) * 0.15;
+      if (rms > 0.06) speedBump = Math.max(speedBump, rms * 0.10);
     } else {
       ampLevel *= 0.92;
     }
-    speedBump *= 0.94;
+    speedBump   *= 0.94;
+    pulseTarget *= 0.982;
+    const rawLv  = Math.min(1.1, Math.max(ampLevel, pulseTarget));
+    ampSmooth   += (rawLv - ampSmooth) * (rawLv > ampSmooth ? 0.05 : 0.025);
 
-    t += (driftRate + speedBump) * (1 + ampLevel * 2);
+    t += (driftRate + speedBump) * (1 + ampSmooth * 1.2);
 
-    // Lerp each blob's current color toward its target
-    for (const b of BLOBS) {
-      b.r += (b.tr - b.r) * 0.02;
-      b.g += (b.tg - b.g) * 0.02;
-      b.b += (b.tb - b.b) * 0.02;
-    }
+    // Smoothly morph tint toward target
+    tintR += (targR - tintR) * 0.04;
+    tintG += (targG - tintG) * 0.04;
+    tintB += (targB - tintB) * 0.04;
 
-    // Compute blob screen positions in low-res pixel space
-    const pos = BLOBS.map(b => ({
-      x: (b.bx + Math.sin(t * b.fx + b.px) * b.ax) * lowW,
-      y: (b.by + Math.sin(t * b.fy + b.py) * b.ay) * lowH,
-    }));
-
-    // Softness radius² in pixel space; swells slightly with audio
-    const baseS  = lowW * 0.18;
-    const swell  = 1 + ampLevel * 0.6;
-    const s2     = (baseS * swell) * (baseS * swell);
+    const cx = lowW * 0.5, cy = lowH * 0.5;
+    const R0 = Math.min(lowW, lowH) * (0.25 + ampSmooth * 0.065);
+    const invR0 = 1 / R0;
 
     if (!imgData || imgData.width !== lowW || imgData.height !== lowH) {
       imgData = lowCtx.createImageData(lowW, lowH);
     }
     const data = imgData.data;
+    data.fill(0);
 
     for (let j = 0; j < lowH; j++) {
+      const dy = (j - cy) * invR0;
+      const dy2 = dy * dy;
+      if (dy2 > 3.6) continue;
+
       for (let i = 0; i < lowW; i++) {
-        let rS = 0, gS = 0, bS = 0, wS = 0;
-        for (let k = 0; k < BLOBS.length; k++) {
-          const b  = BLOBS[k];
-          const p  = pos[k];
-          const dx = i - p.x;
-          const dy = j - p.y;
-          // w = s2/(d²+s2): equals 1 at center, 0.5 at d=baseS, decays smoothly
-          const w  = s2 / (dx*dx + dy*dy + s2);
-          rS += b.r * w;
-          gS += b.g * w;
-          bS += b.b * w;
-          wS += w;
-        }
-        const idx    = (j * lowW + i) * 4;
-        data[idx]    = rS / wS;
-        data[idx+1]  = gS / wS;
-        data[idx+2]  = bS / wS;
-        data[idx+3]  = 255;
+        const dx = (i - cx) * invR0;
+        const r2 = dx * dx + dy2;
+        if (r2 > 3.6) continue;
+
+        const r   = Math.sqrt(r2);
+        const ang = Math.atan2(dy, dx);
+        const wob = blobWobble(ang, t, ampSmooth);
+        const rn  = r / wob;
+        if (rn > 1.75) continue;
+
+        // Circular blob profile: soft inner depth + luminous rim + outer mist
+        const rimD  = (rn - 0.80) * 4.4;
+        const bRim  = Math.exp(-rimD * rimD) * 0.62;
+        const bCore = Math.exp(-rn * rn * 1.55) * 0.48;
+        const bMist = Math.exp(-rn * rn * 0.85) * 0.16;
+        const shim  = 0.11 * Math.sin(dx * 3.1 + t * 0.9) * Math.cos(dy * 3.1 - t * 0.7);
+        const b0    = Math.min(0.84, Math.max(0, (bCore + bRim + bMist) * (0.76 + ampSmooth * 0.28) * (1 + shim)));
+        const b     = b0 * (0.72 + 0.28 * b0);
+        if (b < 0.004) continue;
+
+        // Restrained, less-colorful palette: moody silver-slate core + subtle tinted rim dispersion
+        const rimW = Math.min(1, bRim * 1.45);
+        const disp = 0.09 * Math.sin(ang * 2 - t * 0.5);
+        const rC   = (0.64 + disp) * (1 - rimW * 0.55) + tintR * (rimW * 0.55);
+        const gC   = (0.67)        * (1 - rimW * 0.55) + tintG * (rimW * 0.55);
+        const bC   = (0.74 - disp) * (1 - rimW * 0.55) + tintB * (rimW * 0.55);
+
+        const idx     = (j * lowW + i) * 4;
+        data[idx]     = (rC * b * 255) | 0;
+        data[idx + 1] = (gC * b * 255) | 0;
+        data[idx + 2] = (bC * b * 255) | 0;
+        data[idx + 3] = 255;
       }
     }
 
     lowCtx.putImageData(imgData, 0, 0);
 
-    // Scale up — browser bilinear smoothing acts as a second free blur pass
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, W, H);
     ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = 'high';
+    ctx.imageSmoothingQuality = 'medium';
     ctx.drawImage(lowCv, 0, 0, W, H);
 
-    requestAnimationFrame(frame);
+    drawBlobAnnotations(R0 * RES);
+    drawGrainFrame(ts);
   }
 
-  frame();
+  function drawBlobAnnotations(baseR) {
+    const col = VGA[uiColorIdx] || '#39ff14';
+    const cx  = W * 0.5, cy = H * 0.5;
+    ctx.save();
+    ctx.strokeStyle  = col;
+    ctx.fillStyle    = col;
+    ctx.shadowColor  = col;
+    ctx.font         = '11px "Roboto Mono", monospace';
+    ctx.textBaseline = 'middle';
 
-  // ── Grain ─────────────────────────────────────────────────
+    const angles = [
+      -0.65 + 0.08 * Math.sin(t * 0.35),
+       1.45 + 0.08 * Math.cos(t * 0.28),
+       2.65 + 0.08 * Math.sin(t * 0.31 + 1.2),
+    ];
+
+    for (let k = 0; k < angles.length; k++) {
+      const ang = angles[k];
+      const wob = blobWobble(ang, t, ampSmooth);
+      const rPx = baseR * wob * 0.84;
+      const ax  = cx + Math.cos(ang) * rPx;
+      const ay  = cy + Math.sin(ang) * rPx;
+
+      // Small curved rim arc hugging the blob boundary at this angle
+      ctx.setLineDash([]);
+      ctx.lineWidth   = 0.85;
+      ctx.shadowBlur  = 4;
+      ctx.globalAlpha = 0.52 + ampSmooth * 0.25;
+      ctx.beginPath();
+      for (let s = -6; s <= 6; s++) {
+        const a2 = ang + s * 0.032;
+        const r2 = baseR * blobWobble(a2, t, ampSmooth) * 0.84;
+        const px = cx + Math.cos(a2) * r2;
+        const py = cy + Math.sin(a2) * r2;
+        if (s === -6) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      ctx.stroke();
+
+      // Anchor dot on rim
+      ctx.globalAlpha = 0.85;
+      ctx.beginPath();
+      ctx.arc(ax, ay, 2.0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Dotted radial leader line
+      const lead = 36 + ampSmooth * 14;
+      const tx   = Math.max(70, Math.min(W - 70, ax + Math.cos(ang) * lead));
+      const ty   = Math.max(40, Math.min(H - 40, ay + Math.sin(ang) * lead));
+      ctx.setLineDash([4, 5]);
+      ctx.lineDashOffset = -t * 14;
+      ctx.lineWidth   = 0.8;
+      ctx.globalAlpha = 0.58 + ampSmooth * 0.22;
+      ctx.beginPath();
+      ctx.moveTo(ax, ay);
+      ctx.lineTo(tx, ty);
+      ctx.stroke();
+
+      // Tip cross
+      ctx.setLineDash([]);
+      ctx.lineWidth   = 1.1;
+      ctx.globalAlpha = 0.76;
+      ctx.beginPath();
+      ctx.moveTo(tx - 5, ty); ctx.lineTo(tx + 5, ty);
+      ctx.moveTo(tx, ty - 5); ctx.lineTo(tx, ty + 5);
+      ctx.stroke();
+
+      // Compact single-line polar math annotation
+      const rightSide = Math.cos(ang) >= 0;
+      const inward    = (rightSide && tx > W - 150) || (!rightSide && tx < 150);
+      const alignLeft = inward ? !rightSide : rightSide;
+      ctx.textAlign   = alignLeft ? 'left' : 'right';
+      const lxTxt     = tx + (alignLeft ? 10 : -10);
+      ctx.shadowBlur  = 0;
+      ctx.globalAlpha = 0.76;
+      const label = k === 0
+        ? `r ${wob.toFixed(2)}  θ ${ang.toFixed(2)}`
+        : k === 1
+        ? `δ ${(wob - 1).toFixed(2)}  ω ${(driftRate * 60).toFixed(2)}`
+        : `σ ${(0.25 + ampSmooth * 0.065).toFixed(2)}  a ${ampSmooth.toFixed(2)}`;
+      ctx.fillText(label, lxTxt, ty);
+    }
+
+    ctx.restore();
+  }
+
+  function triggerBlob() {
+    pulseTarget = Math.min(1.1, Math.max(pulseTarget, 0.35) + 0.45);
+    speedBump   = Math.max(speedBump, 0.015);
+  }
+
+  // ── Grain (pre-baked 4 frames, cycled at 30fps) ───────────
   let grainOn  = true;
   const grainEl = document.getElementById('grain-cv');
   const grainCx = grainEl.getContext('2d');
-  let grainImg  = null;
-  function drawGrainFrame() {
-    if (!grainOn) return;
+  const GRAIN_N = 4;
+  const _grainImgs = [];
+  let _grainIdx = 0, _grainLastTs = 0;
+
+  function prebakeGrain() {
     const gW = Math.ceil(window.innerWidth  / 2);
     const gH = Math.ceil(window.innerHeight / 2);
-    if (grainEl.width !== gW || grainEl.height !== gH) {
-      grainEl.width  = gW;
-      grainEl.height = gH;
-      grainImg = grainCx.createImageData(gW, gH);
+    grainEl.width  = gW;
+    grainEl.height = gH;
+    _grainImgs.length = 0;
+    for (let f = 0; f < GRAIN_N; f++) {
+      const img = grainCx.createImageData(gW, gH);
+      const data = img.data;
+      for (let i = 0; i < data.length; i += 4) {
+        const v = Math.random() * 255 | 0;
+        data[i] = data[i+1] = data[i+2] = v;
+        data[i+3] = Math.random() * 30 | 0;
+      }
+      _grainImgs.push(img);
     }
-    const data = grainImg.data;
-    for (let i = 0; i < data.length; i += 4) {
-      const v = Math.random() * 255 | 0;
-      data[i] = data[i+1] = data[i+2] = v;
-      data[i+3] = Math.random() * 30 | 0;
+  }
+  function drawGrainFrame(ts = 0) {
+    if (!grainOn || !_grainImgs.length) return;
+    if (ts - _grainLastTs >= 33) {
+      grainCx.putImageData(_grainImgs[_grainIdx], 0, 0);
+      _grainIdx = (_grainIdx + 1) % GRAIN_N;
+      _grainLastTs = ts;
     }
-    grainCx.putImageData(grainImg, 0, 0);
-    requestAnimationFrame(drawGrainFrame);
   }
   function toggleGrain() {
     grainOn = !grainOn;
-    if (grainOn) drawGrainFrame();
+    if (!grainOn) grainCx.clearRect(0, 0, grainEl.width, grainEl.height);
   }
+  window.addEventListener('resize', prebakeGrain);
   window.addEventListener('keydown', e => { if (e.key === 'g' || e.key === 'G') toggleGrain(); });
-  canvas.addEventListener('click', () => { speedBump = Math.max(speedBump, 0.5); });
-  document.getElementById('tkey').addEventListener('click', () => { speedBump = Math.max(speedBump, 0.5); });
-  drawGrainFrame();
+  canvas.addEventListener('click', triggerBlob);
+  document.getElementById('tkey').addEventListener('click', triggerBlob);
+  prebakeGrain();
+  requestAnimationFrame(frame);
 
   // ── Mic toggle ────────────────────────────────────────────
   const btn = document.getElementById('btn');
@@ -405,9 +530,7 @@
         document.getElementById('speed').style.color  = col;
       } else {
         const [r, g, b] = hexToRgb(col);
-        const blob = BLOBS[morphIdx];
-        blob.tr = r; blob.tg = g; blob.tb = b;
-        morphIdx = (morphIdx + 1) % BLOBS.length;
+        setBlobTint(r, g, b);
       }
     });
     legendEl.appendChild(s);
@@ -451,7 +574,7 @@
   window.addEventListener('keydown', e => {
     if (e.isTrusted) window.parent?.postMessage({ type: 'childKey', key: e.key, shiftKey: !!e.shiftKey }, '*');
     if (e.key === 'c' || e.key === 'C') { cHeld = true; return; }
-    if (e.key === 't' || e.key === 'T') { speedBump = Math.max(speedBump, 0.5); return; }
+    if (e.key === 't' || e.key === 'T') { triggerBlob(); return; }
     if      (e.key === 'ArrowLeft'  && !cHeld) {
       cycleMs = Math.min(560, cycleMs + 140);
       clearInterval(cycleId); cycleId = setInterval(cycleFn, cycleMs); updateSpeedUI();
@@ -467,13 +590,11 @@
     } else if (!cHeld && e.key === 'ArrowUp') {
       colorIdx = (colorIdx - 1 + VGA.length) % VGA.length;
       const [r, g, b] = hexToRgb(VGA[colorIdx]);
-      const blob = BLOBS[morphIdx]; blob.tr = r; blob.tg = g; blob.tb = b;
-      morphIdx = (morphIdx + 1) % BLOBS.length;
+      setBlobTint(r, g, b);
     } else if (!cHeld && e.key === 'ArrowDown') {
       colorIdx = (colorIdx + 1) % VGA.length;
       const [r, g, b] = hexToRgb(VGA[colorIdx]);
-      const blob = BLOBS[morphIdx]; blob.tr = r; blob.tg = g; blob.tb = b;
-      morphIdx = (morphIdx + 1) % BLOBS.length;
+      setBlobTint(r, g, b);
     } else if (cHeld && e.key === 'ArrowUp') {
       uiColorIdx = (uiColorIdx - 1 + VGA.length) % VGA.length;
       btn.style.color   = VGA[uiColorIdx];
@@ -507,8 +628,12 @@
 
   // Randomize colors on load
   (function() {
-    const GOOD = [6,11,13,14,15];
-    colorIdx  = GOOD[Math.floor(Math.random() * GOOD.length)];
+    const TINT_POOL = [6, 9, 11, 12, 13, 14];
+    const GOOD      = [6, 11, 13, 14, 15];
+    colorIdx  = TINT_POOL[Math.floor(Math.random() * TINT_POOL.length)];
+    const [r, g, b] = hexToRgb(VGA[colorIdx]);
+    setBlobTint(r, g, b);
+    tintR = targR; tintG = targG; tintB = targB;
     const _uiPool = GOOD.filter(i => i !== colorIdx);
     uiColorIdx = _uiPool[Math.floor(Math.random() * _uiPool.length)];
     const _uc = VGA[uiColorIdx];

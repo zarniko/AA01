@@ -301,8 +301,8 @@
     });
 
     // ── canvas resize ─────────────────────────────────────────
-    // Render soft glow at 25% of viewport — CSS bilinear-upscales to 100%, hud-cv stays 1:1
-    const SCALE = 0.25;
+    // Render soft glow at 20% of viewport — CSS bilinear-upscales to 100%, hud-cv stays 1:1
+    const SCALE = 0.2;
 
     // Per-column precomputed arc data (re-filled on resize)
     let arcPyArr  = new Float32Array(1);
@@ -514,7 +514,7 @@
         // Vertical dashed drop-line linking the arc point to the active horizontal line
         hudCtx.setLineDash([2, 4]);
         hudCtx.lineWidth   = 0.8;
-        hudCtx.shadowBlur  = 4;
+        hudCtx.shadowBlur  = 0;
         hudCtx.globalAlpha = 0.45 + ampBoost * 0.25;
         hudCtx.beginPath();
         hudCtx.moveTo(ax, arcY);
@@ -623,7 +623,7 @@
     let _lastLoopTs = 0;
     function loop(ts) {
       requestAnimationFrame(loop);
-      if (ts - _lastLoopTs < 15) return; // cap ~66fps on 120Hz displays
+      if (ts - _lastLoopTs < 20) return; // cap ~50fps on 120Hz displays
       _lastLoopTs = ts;
       micActive ? micTick(ts) : idleTick(ts);
       drawGrainFrame(ts);

@@ -310,8 +310,9 @@
     });
 
     // ── canvas resize ─────────────────────────────────────────
-    // Render at 40% of viewport — CSS scales it back to 100%
-    const SCALE = 0.4;
+    // Render at 20% of viewport — CSS scales it back to 100%
+    const SCALE = 0.2;
+    let _imgData = null;
 
     // Per-column precomputed arc data (re-filled on resize)
     let arcPyArr  = new Float32Array(1);
@@ -404,8 +405,12 @@
       const growNear   = 1 + soundLevel * 0.65;
       const bright     = 0.85 + soundLevel * 0.35;
 
-      const data = ctx.createImageData(W, H);
+      if (!_imgData || _imgData.width !== W || _imgData.height !== H) {
+        _imgData = ctx.createImageData(W, H);
+      }
+      const data = _imgData;
       const pix  = data.data;
+      pix.fill(0);
 
       // 5 flowing, domain-warped light-leak ribbons across 3 depth layers (no circular shapes, no hard cutoffs)
       const blobs = [
@@ -484,7 +489,7 @@
           col: sampleHaloPal(BLOB_OFFS[1] + t * 0.055 + 1.8),
           amp: 0.70 * bright,
         },
-      ].map(b => ({ ...b, cosR: Math.cos(b.rot), sinR: Math.sin(b.rot) }));
+      ].map(b => ({ ...b, cosR: Math.cos(b.rot), sinR: Math.sin(b.rot), invSx: 1 / b.sx, invSy: 1 / b.sy }));
 
       for (let py = 0; py < H; py++) {
         const rowOff = py * W * 4;
@@ -498,8 +503,8 @@
             const dy = py - bl.by;
             const lx =  dx * bl.cosR + dy * bl.sinR;
             const ly = -dx * bl.sinR + dy * bl.cosR;
-            const u  = lx / bl.sx;
-            const v  = ly / bl.sy;
+            const u  = lx * bl.invSx;
+            const v  = ly * bl.invSy;
             if (u * u + v * v > 16.0) continue; // < 0.0001 intensity, zero visible edge
 
             const wu = u + bl.warp * Math.sin(v * 1.4 + t * 0.28 + bi * 1.7);
@@ -579,7 +584,7 @@
 
         // Anchor dot on ribbon
         hudCtx.setLineDash([]);
-        hudCtx.shadowBlur  = 5;
+        hudCtx.shadowBlur  = 0;
         hudCtx.globalAlpha = 0.85;
         hudCtx.beginPath();
         hudCtx.arc(ax, ay, 2.0, 0, Math.PI * 2);
@@ -692,9 +697,12 @@
     }
 
     // ── loop ─────────────────────────────────────────────────
+    let _lastLoopTs = 0;
     function loop(ts) {
-      micActive ? micTick(ts) : idleTick(ts);
       requestAnimationFrame(loop);
+      if (ts - _lastLoopTs < 20) return;
+      _lastLoopTs = ts;
+      micActive ? micTick(ts) : idleTick(ts);
     }
 
     // ── T key / click: organic growth pulse ───────────────────
