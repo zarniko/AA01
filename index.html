@@ -167,7 +167,7 @@
       { cols: 4, rows: 2 },  // key 6
     ];
 
-    const isMobile = ('ontouchstart' in window) || window.innerWidth <= 768;
+    const isMobile = window.matchMedia('(pointer: coarse)').matches;
 
     const gridEl = document.getElementById('grid');
     const glass  = document.getElementById('glass');
